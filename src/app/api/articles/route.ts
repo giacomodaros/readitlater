@@ -15,6 +15,7 @@ export async function GET(req: NextRequest) {
       ...(search && {
         OR: [
           { title: { contains: search } },
+          { author: { contains: search } },
           { description: { contains: search } },
           { siteName: { contains: search } },
         ],

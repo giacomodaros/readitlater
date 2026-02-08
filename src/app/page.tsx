@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, Fragment } from "react";
+import { useEffect, useState, useCallback, Fragment, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import AddArticleForm from "@/components/AddArticleForm";
 import ArticleCard from "@/components/ArticleCard";
@@ -44,16 +44,20 @@ export default function HomePage() {
   const [articles, setArticles] = useState<Article[]>([]);
   const [labels, setLabels] = useState<Label[]>([]);
   const [filterLabel, setFilterLabel] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
 
-  const fetchArticles = useCallback(async () => {
+  const fetchArticles = useCallback(async (searchQuery?: string) => {
     const params = new URLSearchParams();
     params.set("archived", String(isArchiveView));
     if (filterLabel) params.set("labelId", filterLabel);
+    const q = searchQuery ?? search;
+    if (q.trim()) params.set("search", q.trim());
     const res = await fetch(`/api/articles?${params}`);
     setArticles(await res.json());
     setLoading(false);
-  }, [isArchiveView, filterLabel]);
+  }, [isArchiveView, filterLabel, search]);
 
   const fetchLabels = useCallback(async () => {
     const res = await fetch("/api/labels");
@@ -62,9 +66,24 @@ export default function HomePage() {
 
   useEffect(() => {
     setLoading(true);
-    fetchArticles();
+    setSearch("");
+    setFilterLabel(null);
+    fetchArticles("");
     fetchLabels();
-  }, [fetchArticles, fetchLabels]);
+  }, [isArchiveView]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    setLoading(true);
+    fetchArticles();
+  }, [filterLabel]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function handleSearchChange(value: string) {
+    setSearch(value);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      fetchArticles(value);
+    }, 250);
+  }
 
   async function handleArchiveToggle(id: string, archived: boolean) {
     await fetch(`/api/articles/${id}`, {
@@ -81,39 +100,66 @@ export default function HomePage() {
     fetchArticles();
   }
 
-  const emptyMessage = isArchiveView
-    ? "No archived articles."
-    : "No articles yet. Paste a URL above to get started.";
+  const emptyMessage = search.trim()
+    ? "No articles match your search."
+    : isArchiveView
+      ? "No archived articles."
+      : "No articles yet. Paste a URL above to get started.";
 
   return (
-    <div className="space-y-6">
-      {!isArchiveView && <AddArticleForm onAdded={fetchArticles} />}
+    <div className="space-y-5">
+      {!isArchiveView && <AddArticleForm onAdded={() => fetchArticles()} />}
 
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-neutral-800">
+      <div className="flex items-center justify-between gap-4">
+        <h2 className="shrink-0 text-lg font-semibold text-neutral-800">
           {isArchiveView ? "Archive" : "To Read"}
         </h2>
-        {labels.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => setFilterLabel(null)}
-              className={clsx(
-                "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-                !filterLabel
-                  ? "border-brand-purple bg-brand-purple-light text-brand-purple"
-                  : "border-cream-dark text-neutral-500 hover:bg-cream-dark/50"
-              )}
-            >
-              All
-            </button>
-            {labels.map((l) => (
-              <button key={l.id} onClick={() => setFilterLabel(l.id)}>
-                <LabelBadge name={l.name} color={l.color} />
-              </button>
-            ))}
-          </div>
-        )}
+
+        {/* Search */}
+        <div className="relative max-w-xs flex-1">
+          <svg
+            className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-400"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z" />
+          </svg>
+          <input
+            type="text"
+            placeholder="Search by title or author..."
+            value={search}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            className="w-full rounded-lg border-2 border-cream-dark bg-cream py-1.5 pl-9 pr-3 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-brand-purple focus:outline-none"
+          />
+        </div>
       </div>
+
+      {/* Label filters — shown on both views when labels exist */}
+      {labels.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setFilterLabel(null)}
+            className={clsx(
+              "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+              !filterLabel
+                ? "border-brand-purple bg-brand-purple-light text-brand-purple"
+                : "border-cream-dark text-neutral-500 hover:bg-cream-dark/50"
+            )}
+          >
+            All
+          </button>
+          {labels.map((l) => (
+            <button
+              key={l.id}
+              onClick={() => setFilterLabel(filterLabel === l.id ? null : l.id)}
+            >
+              <LabelBadge name={l.name} color={l.color} />
+            </button>
+          ))}
+        </div>
+      )}
 
       {loading ? (
         <div className="py-20 text-center text-neutral-400">Loading...</div>
