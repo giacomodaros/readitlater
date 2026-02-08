@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Suspense } from "react";
 import "./globals.css";
-import Navbar from "@/components/Navbar";
+import Sidebar from "@/components/Sidebar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -14,8 +15,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ReadLater",
-  description: "Personal read-it-later web app",
+  title: "Reader",
+  description: "Read-it-later by Artifacts",
 };
 
 export default function RootLayout({
@@ -28,8 +29,14 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-cream text-neutral-900`}
       >
-        <Navbar />
-        <main className="mx-auto max-w-5xl px-4 py-6">{children}</main>
+        <div className="flex h-screen overflow-hidden">
+          <Suspense>
+            <Sidebar />
+          </Suspense>
+          <main className="flex-1 overflow-y-auto">
+            <div className="mx-auto max-w-4xl px-6 py-6">{children}</div>
+          </main>
+        </div>
       </body>
     </html>
   );

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, Fragment } from "react";
+import { useSearchParams } from "next/navigation";
 import AddArticleForm from "@/components/AddArticleForm";
 import ArticleCard from "@/components/ArticleCard";
 import LabelBadge from "@/components/LabelBadge";
@@ -37,20 +38,22 @@ function StripeDivider() {
 }
 
 export default function HomePage() {
+  const searchParams = useSearchParams();
+  const isArchiveView = searchParams.get("view") === "archive";
+
   const [articles, setArticles] = useState<Article[]>([]);
   const [labels, setLabels] = useState<Label[]>([]);
   const [filterLabel, setFilterLabel] = useState<string | null>(null);
-  const [showArchived, setShowArchived] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const fetchArticles = useCallback(async () => {
     const params = new URLSearchParams();
-    params.set("archived", String(showArchived));
+    params.set("archived", String(isArchiveView));
     if (filterLabel) params.set("labelId", filterLabel);
     const res = await fetch(`/api/articles?${params}`);
     setArticles(await res.json());
     setLoading(false);
-  }, [showArchived, filterLabel]);
+  }, [isArchiveView, filterLabel]);
 
   const fetchLabels = useCallback(async () => {
     const res = await fetch("/api/labels");
@@ -58,6 +61,7 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    setLoading(true);
     fetchArticles();
     fetchLabels();
   }, [fetchArticles, fetchLabels]);
@@ -77,47 +81,44 @@ export default function HomePage() {
     fetchArticles();
   }
 
+  const emptyMessage = isArchiveView
+    ? "No archived articles."
+    : "No articles yet. Paste a URL above to get started.";
+
   return (
     <div className="space-y-6">
-      <AddArticleForm onAdded={fetchArticles} />
+      {!isArchiveView && <AddArticleForm onAdded={fetchArticles} />}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          onClick={() => setShowArchived(!showArchived)}
-          className={clsx(
-            "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-            showArchived
-              ? "border-brand-purple bg-brand-purple-light text-brand-purple"
-              : "border-cream-dark text-neutral-500 hover:bg-cream-dark/50"
-          )}
-        >
-          {showArchived ? "Showing archived" : "Show archived"}
-        </button>
-        <span className="text-xs text-cream-dark">|</span>
-        <button
-          onClick={() => setFilterLabel(null)}
-          className={clsx(
-            "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-            !filterLabel
-              ? "border-brand-purple bg-brand-purple-light text-brand-purple"
-              : "border-cream-dark text-neutral-500 hover:bg-cream-dark/50"
-          )}
-        >
-          All
-        </button>
-        {labels.map((l) => (
-          <button key={l.id} onClick={() => setFilterLabel(l.id)}>
-            <LabelBadge name={l.name} color={l.color} />
-          </button>
-        ))}
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-neutral-800">
+          {isArchiveView ? "Archive" : "To Read"}
+        </h2>
+        {labels.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setFilterLabel(null)}
+              className={clsx(
+                "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
+                !filterLabel
+                  ? "border-brand-purple bg-brand-purple-light text-brand-purple"
+                  : "border-cream-dark text-neutral-500 hover:bg-cream-dark/50"
+              )}
+            >
+              All
+            </button>
+            {labels.map((l) => (
+              <button key={l.id} onClick={() => setFilterLabel(l.id)}>
+                <LabelBadge name={l.name} color={l.color} />
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {loading ? (
         <div className="py-20 text-center text-neutral-400">Loading...</div>
       ) : articles.length === 0 ? (
-        <div className="py-20 text-center text-neutral-400">
-          No articles yet. Paste a URL above to get started.
-        </div>
+        <div className="py-20 text-center text-neutral-400">{emptyMessage}</div>
       ) : (
         <div>
           {articles.map((a, i) => (
