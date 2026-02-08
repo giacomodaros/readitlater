@@ -1,26 +1,30 @@
 @import "tailwindcss";
-
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@plugin "@tailwindcss/typography";
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  --color-cream: #f4efe5;
+  --color-cream-dark: #e8e1d3;
+
+  --color-brand-purple: #7B6AEE;
+  --color-brand-purple-light: #ece9fd;
+  --color-brand-green: #2DB87A;
+  --color-brand-green-light: #e2f7ed;
+  --color-brand-blue: #6CBAFC;
+  --color-brand-blue-light: #e3f1ff;
+  --color-brand-orange: #E8883A;
+  --color-brand-orange-light: #fdf0e4;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* Brand stripe divider */
+.brand-stripes {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.brand-stripes > span {
+  height: 3px;
+  border-radius: 2px;
 }

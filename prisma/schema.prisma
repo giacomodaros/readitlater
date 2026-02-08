@@ -1,0 +1,48 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Article {
+  id          String      @id @default(cuid())
+  url         String      @unique
+  title       String
+  author      String?
+  description String?
+  content     String
+  image       String?
+  favicon     String?
+  siteName    String?
+  publishedAt DateTime?
+  ttr         Int?
+  archived    Boolean     @default(false)
+  readAt      DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  labels      Label[]
+  highlights  Highlight[]
+}
+
+model Label {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  color     String
+  createdAt DateTime  @default(now())
+  articles  Article[]
+}
+
+model Highlight {
+  id          String   @id @default(cuid())
+  articleId   String
+  text        String
+  startOffset Int
+  endOffset   Int
+  color       String   @default("#facc15")
+  note        String?
+  createdAt   DateTime @default(now())
+  article     Article  @relation(fields: [articleId], references: [id], onDelete: Cascade)
+}
