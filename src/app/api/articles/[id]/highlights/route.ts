@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { sendHighlightToNotion } from "@/lib/notion";
+import { syncHighlightToNotion } from "@/lib/notion";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -35,20 +35,40 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     }),
     prisma.article.findUnique({
       where: { id },
-      select: { title: true, url: true, author: true, siteName: true, publishedAt: true },
+      select: {
+        title: true,
+        url: true,
+        author: true,
+        siteName: true,
+        publishedAt: true,
+        notionPageId: true,
+        labels: { select: { name: true } },
+      },
     }),
   ]);
 
-  // Fire-and-forget — don't block the response
+  // Sync to Notion — create article page on first highlight, then append
   if (article) {
-    sendHighlightToNotion({
+    syncHighlightToNotion({
+      notionPageId: article.notionPageId,
       highlightText: text,
       articleTitle: article.title,
       articleUrl: article.url,
       author: article.author,
       siteName: article.siteName,
       publishedAt: article.publishedAt,
-    }).catch((err) => console.error("[Notion] Failed to send highlight:", err));
+      labels: article.labels.map((l) => l.name),
+    })
+      .then((notionPageId) => {
+        // Persist the Notion page ID if it was just created
+        if (notionPageId && notionPageId !== article.notionPageId) {
+          return prisma.article.update({
+            where: { id },
+            data: { notionPageId },
+          });
+        }
+      })
+      .catch((err) => console.error("[Notion] Failed to sync highlight:", err));
   }
 
   return NextResponse.json(highlight, { status: 201 });

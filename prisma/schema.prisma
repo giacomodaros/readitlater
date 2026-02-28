@@ -20,8 +20,9 @@ model Article {
   publishedAt DateTime?
   ttr         Int?
   archived    Boolean     @default(false)
-  readAt      DateTime?
-  createdAt   DateTime    @default(now())
+  readAt        DateTime?
+  notionPageId  String?
+  createdAt     DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
   labels      Label[]
   highlights  Highlight[]
