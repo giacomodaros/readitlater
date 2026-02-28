@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { extractArticle } from "@/lib/extractor";
+import { extractArticle, extractFromHtml } from "@/lib/extractor";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
@@ -30,7 +30,7 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { url } = body;
+  const { url, html } = body;
 
   if (!url || typeof url !== "string") {
     return NextResponse.json({ error: "URL is required" }, { status: 400 });
@@ -42,7 +42,12 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const data = await extractArticle(url);
+    // If the browser sent the page HTML, parse it directly (bypasses rate limits).
+    // Otherwise fall back to server-side fetching.
+    const data = html && typeof html === "string"
+      ? extractFromHtml(url, html)
+      : await extractArticle(url);
+
     const article = await prisma.article.create({
       data,
       include: { labels: true },
