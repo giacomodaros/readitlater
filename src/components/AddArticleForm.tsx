@@ -34,21 +34,21 @@ export default function AddArticleForm({ onAdded }: { onAdded: () => void }) {
 
   return (
     <div>
-      <form onSubmit={handleSubmit} className="flex gap-2">
+      <form onSubmit={handleSubmit} className="flex gap-1.5">
         <input
           type="url"
-          placeholder="Paste an article URL..."
+          placeholder="Paste URL..."
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           required
-          className="flex-1 rounded-lg border-2 border-cream-dark bg-cream px-4 py-2.5 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-brand-purple focus:outline-none"
+          className="min-w-0 flex-1 rounded-md border border-cream-dark bg-cream px-3 py-1.5 text-xs text-neutral-900 placeholder:text-neutral-400 focus:border-brand-purple focus:outline-none"
         />
         <button
           type="submit"
           disabled={loading}
-          className="rounded-lg bg-brand-purple px-5 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          className="shrink-0 rounded-md bg-brand-purple px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
         >
-          {loading ? "Saving..." : "Save"}
+          {loading ? "..." : "Save"}
         </button>
       </form>
       {error && <p className="mt-2 text-sm text-brand-orange">{error}</p>}

@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@extractus/article-extractor": "^8.0.20",
+    "@notionhq/client": "^5.11.0",
     "@prisma/adapter-better-sqlite3": "^7.3.0",
     "@prisma/client": "^7.3.0",
     "@tailwindcss/typography": "^0.5.19",

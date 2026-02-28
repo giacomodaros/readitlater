@@ -1,5 +1,11 @@
 import { extract } from "@extractus/article-extractor";
 
+function computeReadingTime(html: string): number {
+  const text = html.replace(/<[^>]*>/g, " ");
+  const words = text.split(/\s+/).filter(Boolean).length;
+  return Math.max(1, Math.round(words / 238));
+}
+
 export async function extractArticle(url: string) {
   const article = await extract(url);
   if (!article) throw new Error("Failed to extract article from URL");
@@ -14,6 +20,6 @@ export async function extractArticle(url: string) {
     favicon: article.favicon ?? null,
     siteName: article.source ?? null,
     publishedAt: article.published ? new Date(article.published) : null,
-    ttr: article.ttr ?? null,
+    ttr: computeReadingTime(article.content),
   };
 }

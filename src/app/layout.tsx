@@ -33,8 +33,8 @@ export default function RootLayout({
           <Suspense>
             <Sidebar />
           </Suspense>
-          <main className="flex-1 overflow-y-auto">
-            <div className="mx-auto max-w-4xl px-6 py-6">{children}</div>
+          <main className="flex-1 overflow-hidden">
+            {children}
           </main>
         </div>
       </body>
