@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import AddArticleForm from "@/components/AddArticleForm";
 import ArticleCard from "@/components/ArticleCard";
@@ -49,7 +49,7 @@ type FullArticle = {
   highlights: Highlight[];
 };
 
-export default function HomePage() {
+function HomePageContent() {
   const searchParams = useSearchParams();
   const isArchiveView = searchParams.get("view") === "archive";
 
@@ -341,5 +341,13 @@ export default function HomePage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function HomePage() {
+  return (
+    <Suspense>
+      <HomePageContent />
+    </Suspense>
   );
 }
