@@ -15,17 +15,19 @@ function faviconUrl(url: string): string {
 
 /** Parse pre-fetched HTML from the browser (bypasses rate limits / paywalls). */
 export async function extractFromHtml(url: string, html: string) {
-  const { JSDOM } = await import("jsdom");
+  const { parseHTML } = await import("linkedom");
   const { Readability } = await import("@mozilla/readability");
 
-  const dom = new JSDOM(html, { url });
-  const article = new Readability(dom.window.document).parse();
+  const { document } = parseHTML(html);
+  // linkedom's document is compatible with Readability
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const article = new Readability(document as any).parse();
 
   if (!article) throw new Error("Could not parse article content");
 
   const content = article.content ?? "";
   const siteNameMeta =
-    dom.window.document
+    document
       .querySelector('meta[property="og:site_name"]')
       ?.getAttribute("content") ?? null;
 
@@ -36,7 +38,7 @@ export async function extractFromHtml(url: string, html: string) {
     description: article.excerpt ?? null,
     content,
     image:
-      dom.window.document
+      document
         .querySelector('meta[property="og:image"]')
         ?.getAttribute("content") ?? null,
     favicon: faviconUrl(url),

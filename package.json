@@ -18,8 +18,9 @@
     "@prisma/client": "^7.3.0",
     "@tailwindcss/typography": "^0.5.19",
     "better-sqlite3": "^12.6.2",
+    "canvas": "^3.2.1",
     "clsx": "^2.1.1",
-    "jsdom": "^28.1.0",
+    "linkedom": "^0.18.12",
     "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3"
@@ -27,7 +28,6 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/better-sqlite3": "^7.6.13",
-    "@types/jsdom": "^28.0.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

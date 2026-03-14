@@ -8,7 +8,7 @@ const nextConfig: NextConfig = {
     "@prisma/adapter-better-sqlite3",
     "@extractus/article-extractor",
     "@mozilla/readability",
-    "jsdom",
+    "linkedom",
   ],
 };
 
