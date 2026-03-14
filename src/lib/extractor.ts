@@ -1,7 +1,3 @@
-import { extract } from "@extractus/article-extractor";
-import { Readability } from "@mozilla/readability";
-import { JSDOM } from "jsdom";
-
 function computeReadingTime(html: string): number {
   const text = html.replace(/<[^>]*>/g, " ");
   const words = text.split(/\s+/).filter(Boolean).length;
@@ -18,7 +14,10 @@ function faviconUrl(url: string): string {
 }
 
 /** Parse pre-fetched HTML from the browser (bypasses rate limits / paywalls). */
-export function extractFromHtml(url: string, html: string) {
+export async function extractFromHtml(url: string, html: string) {
+  const { JSDOM } = await import("jsdom");
+  const { Readability } = await import("@mozilla/readability");
+
   const dom = new JSDOM(html, { url });
   const article = new Readability(dom.window.document).parse();
 
@@ -49,6 +48,7 @@ export function extractFromHtml(url: string, html: string) {
 
 /** Fetch and extract via server-side HTTP (works for open, non-rate-limited sites). */
 export async function extractArticle(url: string) {
+  const { extract } = await import("@extractus/article-extractor");
   const article = await extract(url);
   if (!article) throw new Error("Failed to extract article from URL");
   if (!article.content) throw new Error("No content found in article");

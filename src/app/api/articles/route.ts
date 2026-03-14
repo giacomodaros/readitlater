@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
     }
 
     const data = html && typeof html === "string"
-      ? extractFromHtml(url, html)
+      ? await extractFromHtml(url, html)
       : await extractArticle(url);
 
     const article = await prisma.article.create({
