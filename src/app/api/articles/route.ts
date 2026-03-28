@@ -9,6 +9,13 @@ export async function GET(req: NextRequest) {
     const labelId = searchParams.get("labelId");
     const search = searchParams.get("search");
 
+    const sort = searchParams.get("sort") ?? "newest";
+    const orderBy =
+      sort === "oldest" ? { createdAt: "asc" as const } :
+      sort === "ttr" ? { ttr: "asc" as const } :
+      sort === "published" ? { publishedAt: "desc" as const } :
+      { createdAt: "desc" as const };
+
     const articles = await prisma.article.findMany({
       where: {
         ...(archived !== null && { archived: archived === "true" }),
@@ -23,7 +30,7 @@ export async function GET(req: NextRequest) {
         }),
       },
       include: { labels: true, _count: { select: { highlights: true } } },
-      orderBy: { createdAt: "desc" },
+      orderBy,
     });
 
     return NextResponse.json(articles);

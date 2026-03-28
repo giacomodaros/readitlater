@@ -11,7 +11,14 @@ interface ArticleReaderProps {
   siteName?: string | null;
   publishedAt?: string | null;
   ttr?: number | null;
+  fontSize?: "sm" | "md" | "lg";
 }
+
+const FONT_SIZE_CLASS = {
+  sm: "prose-sm",
+  md: "",
+  lg: "prose-lg",
+};
 
 export default function ArticleReader({
   articleId,
@@ -21,38 +28,46 @@ export default function ArticleReader({
   siteName,
   publishedAt,
   ttr,
+  fontSize = "md",
 }: ArticleReaderProps) {
   const contentRef = useRef<HTMLDivElement>(null);
 
+  const byline = [
+    author ? `By ${author}` : null,
+    siteName && author ? `on ${siteName}` : siteName,
+    publishedAt
+      ? new Date(publishedAt).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
+      : null,
+    ttr ? `${ttr} min read` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
-    <article className="mx-auto max-w-2xl">
-      <header className="mb-8 border-b border-cream-dark pb-6">
-        <h1 className="text-3xl font-bold leading-tight text-neutral-900">{title}</h1>
-        <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-neutral-500">
-          {author && <span>By {author}</span>}
-          {siteName && <span>{author ? "on" : ""} {siteName}</span>}
-          {publishedAt && (
-            <span>
-              {new Date(publishedAt).toLocaleDateString("en-US", {
-                year: "numeric",
-                month: "long",
-                day: "numeric",
-              })}
-            </span>
-          )}
-          {ttr && <span>{ttr} min read</span>}
-        </div>
+    <article className="mx-auto max-w-[68ch]">
+      <header className="mb-10 border-b border-cream-dark pb-8">
+        <h1 className="text-[1.75rem] font-bold leading-[1.25] tracking-tight text-neutral-900">
+          {title}
+        </h1>
+        {byline && (
+          <p className="mt-3 text-[13px] leading-relaxed text-neutral-400">{byline}</p>
+        )}
       </header>
 
       <div className="relative">
-        <HighlightLayer
-          articleId={articleId}
-          contentRef={contentRef}
-          originalHtml={content}
-        />
+        <HighlightLayer articleId={articleId} contentRef={contentRef} originalHtml={content} />
         <div
           ref={contentRef}
-          className="prose prose-neutral max-w-none prose-headings:font-semibold prose-a:text-brand-purple prose-img:rounded-lg"
+          className={[
+            "prose prose-neutral max-w-none",
+            "prose-headings:font-semibold prose-headings:tracking-tight",
+            "prose-p:leading-[1.8] prose-p:text-neutral-800",
+            "prose-a:text-brand-purple prose-a:no-underline hover:prose-a:underline",
+            "prose-img:rounded-xl prose-img:shadow-sm",
+            "prose-blockquote:border-brand-purple/40 prose-blockquote:text-neutral-600",
+            "prose-code:text-brand-purple prose-code:font-normal",
+            FONT_SIZE_CLASS[fontSize],
+          ].join(" ")}
           dangerouslySetInnerHTML={{ __html: content }}
         />
       </div>

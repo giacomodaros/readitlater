@@ -25,13 +25,8 @@ function formatDate(dateStr: string) {
   const now = new Date();
   const diff = now.getTime() - d.getTime();
   const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-
-  if (days === 0) {
-    return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-  }
-  if (days < 7) {
-    return d.toLocaleDateString("en-US", { weekday: "short" });
-  }
+  if (days === 0) return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  if (days < 7) return d.toLocaleDateString("en-US", { weekday: "short" });
   const sameYear = d.getFullYear() === now.getFullYear();
   return d.toLocaleDateString("en-US", {
     month: "short",
@@ -43,7 +38,6 @@ function formatDate(dateStr: string) {
 export default function ArticleCard({
   title,
   author,
-  description,
   siteName,
   favicon,
   publishedAt,
@@ -60,63 +54,55 @@ export default function ArticleCard({
     <button
       onClick={onClick}
       className={clsx(
-        "block w-full cursor-pointer border-b border-cream-dark px-4 py-3 text-left transition-colors",
+        "group block w-full cursor-pointer border-b border-cream-dark px-4 py-3.5 text-left transition-colors",
         selected
           ? "border-l-2 border-l-brand-purple bg-white"
-          : "border-l-2 border-l-transparent hover:bg-cream-dark/30"
+          : "border-l-2 border-l-transparent hover:bg-white/70"
       )}
     >
-      {/* Row 1: favicon + source + date */}
-      <div className="flex items-center gap-2">
-        <div className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-cream-dark">
-          {favicon ? (
-            <img src={favicon} alt="" className="h-5 w-5 rounded-full object-cover" />
-          ) : (
-            <span className="text-[9px] font-bold text-neutral-400">
-              {(source || title).charAt(0).toUpperCase()}
-            </span>
-          )}
-        </div>
-        <span
-          className={clsx(
-            "min-w-0 flex-1 truncate text-sm",
-            isUnread ? "font-semibold text-neutral-900" : "font-medium text-neutral-600"
-          )}
-        >
-          {source || "Unknown"}
-        </span>
-        {publishedAt && (
-          <span className="shrink-0 text-xs text-neutral-400">
-            {formatDate(publishedAt)}
-          </span>
-        )}
-      </div>
-
-      {/* Row 2: title */}
+      {/* Title — dominant element */}
       <p
         className={clsx(
-          "mt-1 truncate text-sm leading-snug",
-          isUnread ? "font-semibold text-neutral-800" : "text-neutral-600"
+          "text-sm leading-snug",
+          isUnread ? "font-semibold text-neutral-900" : "font-medium text-neutral-600"
         )}
       >
         {title}
       </p>
 
-      {/* Row 3: description preview + labels + ttr */}
-      <div className="mt-0.5 flex items-center gap-1.5">
-        {labels.length > 0 && (
-          <span className="flex shrink-0 gap-1">
-            {labels.map((l) => (
-              <LabelBadge key={l.id} name={l.name} color={l.color} />
-            ))}
-          </span>
-        )}
-        {description && (
-          <span className="min-w-0 truncate text-xs text-neutral-400">
-            {description}
-          </span>
+      {/* Source + date */}
+      <div className="mt-1 flex items-center gap-1.5">
+        {favicon ? (
+          <img src={favicon} alt="" className="h-3.5 w-3.5 rounded-full object-cover opacity-70" />
+        ) : null}
+        <span className="min-w-0 truncate text-[11px] text-neutral-400">
+          {source || "Unknown"}
+        </span>
+        {publishedAt && (
+          <>
+            <span className="text-neutral-300">·</span>
+            <span className="shrink-0 text-[11px] text-neutral-400">{formatDate(publishedAt)}</span>
+          </>
         )}
       </div>
+
+      {/* Bottom row: labels + TTR */}
+      {(labels.length > 0 || ttr) && (
+        <div className="mt-2 flex items-center gap-1.5">
+          {labels.length > 0 && (
+            <span className="flex gap-1">
+              {labels.map((l) => (
+                <LabelBadge key={l.id} name={l.name} color={l.color} />
+              ))}
+            </span>
+          )}
+          {ttr && (
+            <span className="ml-auto shrink-0 text-[10px] text-neutral-300">
+              {ttr}m
+            </span>
+          )}
+        </div>
+      )}
     </button>
   );
 }
