@@ -58,8 +58,8 @@ export default function ArticleCard({
       className={clsx(
         "group block w-full cursor-pointer border-b border-cream-dark px-4 py-3.5 text-left transition-colors",
         selected
-          ? "border-l-2 border-l-brand-purple bg-white"
-          : "border-l-2 border-l-transparent hover:bg-white/70"
+          ? "border-l-2 border-l-brand-purple bg-white shadow-sm"
+          : "border-l-2 border-l-transparent hover:bg-white/80 hover:shadow-sm"
       )}
     >
       {/* Title — dominant element */}

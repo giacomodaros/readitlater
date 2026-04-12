@@ -46,11 +46,11 @@ export default function ArticleReader({
   return (
     <article className="mx-auto max-w-[68ch]">
       <header className="mb-10 border-b border-cream-dark pb-8">
-        <h1 className="text-[1.75rem] font-bold leading-[1.25] tracking-tight text-neutral-900">
+        <h1 className="font-serif-display text-[2rem] font-normal leading-[1.2] text-neutral-900">
           {title}
         </h1>
         {byline && (
-          <p className="mt-3 text-[13px] leading-relaxed text-neutral-400">{byline}</p>
+          <p className="mt-4 text-[12.5px] uppercase tracking-widest text-neutral-400">{byline}</p>
         )}
       </header>
 
@@ -59,12 +59,12 @@ export default function ArticleReader({
         <div
           ref={contentRef}
           className={[
-            "prose prose-neutral max-w-none",
-            "prose-headings:font-semibold prose-headings:tracking-tight",
-            "prose-p:leading-[1.8] prose-p:text-neutral-800",
+            "prose prose-neutral max-w-none font-serif-body",
+            "prose-headings:tracking-tight",
+            "prose-p:leading-[1.85] prose-p:text-neutral-800",
             "prose-a:text-brand-purple prose-a:no-underline hover:prose-a:underline",
             "prose-img:rounded-xl prose-img:shadow-sm",
-            "prose-blockquote:border-brand-purple/40 prose-blockquote:text-neutral-600",
+            "prose-blockquote:border-brand-purple/40 prose-blockquote:text-neutral-600 prose-blockquote:font-serif-body",
             "prose-code:text-brand-purple prose-code:font-normal",
             FONT_SIZE_CLASS[fontSize],
           ].join(" ")}

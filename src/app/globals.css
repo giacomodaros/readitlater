@@ -4,6 +4,8 @@
 @theme inline {
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-serif-display: var(--font-dm-serif-display);
+  --font-serif-body: var(--font-source-serif);
 
   --color-cream: #f4efe5;
   --color-cream-dark: #e8e1d3;
@@ -16,6 +18,32 @@
   --color-brand-blue-light: #e3f1ff;
   --color-brand-orange: #E8883A;
   --color-brand-orange-light: #fdf0e4;
+}
+
+/* Article entry animation */
+@keyframes article-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.article-in {
+  animation: article-in 0.38s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Editorial prose overrides — headings use display serif, body uses reading serif */
+.prose :where(h2, h3, h4, h5) {
+  font-family: var(--font-serif-display);
+  font-weight: 400;
+}
+
+.prose :where(p, li, blockquote, td) {
+  font-family: var(--font-source-serif);
 }
 
 /* Brand stripe divider */

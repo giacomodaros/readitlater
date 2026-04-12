@@ -421,7 +421,7 @@ function HomePageContent() {
         {articleLoading ? (
           <div className="py-20 text-center text-xs text-neutral-400">Loading…</div>
         ) : fullArticle ? (
-          <div className="px-10 py-8">
+          <div key={fullArticle.id} className="px-10 py-8 article-in">
 
             {/* Toolbar */}
             <div className="mb-8 flex items-center justify-between">
