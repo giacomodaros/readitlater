@@ -47,28 +47,29 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     }),
   ]);
 
-  // Sync to Notion — create article page on first highlight, then append
+  // Sync to Notion — create article page on first highlight, then append.
+  // Awaited so the notionPageId is persisted before the next highlight can race.
   if (article) {
-    syncHighlightToNotion({
-      notionPageId: article.notionPageId,
-      highlightText: text,
-      articleTitle: article.title,
-      articleUrl: article.url,
-      author: article.author,
-      siteName: article.siteName,
-      publishedAt: article.publishedAt,
-      labels: article.labels.map((l) => l.name),
-    })
-      .then((notionPageId) => {
-        // Persist the Notion page ID if it was just created
-        if (notionPageId && notionPageId !== article.notionPageId) {
-          return prisma.article.update({
-            where: { id },
-            data: { notionPageId },
-          });
-        }
-      })
-      .catch((err) => console.error("[Notion] Failed to sync highlight:", err));
+    try {
+      const notionPageId = await syncHighlightToNotion({
+        notionPageId: article.notionPageId,
+        highlightText: text,
+        articleTitle: article.title,
+        articleUrl: article.url,
+        author: article.author,
+        siteName: article.siteName,
+        publishedAt: article.publishedAt,
+        labels: article.labels.map((l) => l.name),
+      });
+      if (notionPageId && notionPageId !== article.notionPageId) {
+        await prisma.article.update({
+          where: { id },
+          data: { notionPageId },
+        });
+      }
+    } catch (err) {
+      console.error("[Notion] Failed to sync highlight:", err);
+    }
   }
 
   return NextResponse.json(highlight, { status: 201 });
