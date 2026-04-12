@@ -74,7 +74,12 @@ function HomePageContent() {
   const [articleLoading, setArticleLoading] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [notionSyncing, setNotionSyncing] = useState(false);
-  const [fontSize, setFontSize] = useState<"sm" | "md" | "lg">("md");
+  const [fontSize, setFontSize] = useState<"sm" | "md" | "lg">(() => {
+    if (typeof window !== "undefined") {
+      return (localStorage.getItem("reader-font-size") as "sm" | "md" | "lg") || "md";
+    }
+    return "md";
+  });
 
   // UI state
   const [showAddForm, setShowAddForm] = useState(false);
@@ -85,6 +90,10 @@ function HomePageContent() {
   const readerPaneRef = useRef<HTMLDivElement>(null);
   const sortMenuRef = useRef<HTMLDivElement>(null);
   const overflowMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    localStorage.setItem("reader-font-size", fontSize);
+  }, [fontSize]);
 
   // Close menus on outside click
   useEffect(() => {
@@ -474,16 +483,31 @@ function HomePageContent() {
                       </div>
 
                       {/* Notion */}
-                      <button
-                        onClick={() => { handleNotionSync(); setOverflowOpen(false); }}
-                        disabled={notionSyncing || !!fullArticle.notionPageId}
-                        className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs text-neutral-600 transition-colors hover:bg-cream disabled:opacity-40"
-                      >
-                        <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 20 20" fill="currentColor">
-                          <path fillRule="evenodd" d="M4.25 5.5a.75.75 0 0 0-.75.75v8.5c0 .414.336.75.75.75h8.5a.75.75 0 0 0 .75-.75v-4a.75.75 0 0 1 1.5 0v4A2.25 2.25 0 0 1 12.75 17h-8.5A2.25 2.25 0 0 1 2 14.75v-8.5A2.25 2.25 0 0 1 4.25 4h5a.75.75 0 0 1 0 1.5h-5Zm6.5-3a.75.75 0 0 1 .75-.75h3.5a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0V3.56l-4.22 4.22a.75.75 0 0 1-1.06-1.06l4.22-4.22h-2.19a.75.75 0 0 1-.75-.75Z" clipRule="evenodd" />
-                        </svg>
-                        {notionSyncing ? "Syncing…" : fullArticle.notionPageId ? "Synced to Notion" : "Send to Notion"}
-                      </button>
+                      {fullArticle.notionPageId ? (
+                        <a
+                          href={`https://notion.so/${fullArticle.notionPageId.replace(/-/g, "")}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => setOverflowOpen(false)}
+                          className="flex items-center gap-2.5 px-3 py-2 text-xs text-neutral-600 transition-colors hover:bg-cream"
+                        >
+                          <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M4.25 5.5a.75.75 0 0 0-.75.75v8.5c0 .414.336.75.75.75h8.5a.75.75 0 0 0 .75-.75v-4a.75.75 0 0 1 1.5 0v4A2.25 2.25 0 0 1 12.75 17h-8.5A2.25 2.25 0 0 1 2 14.75v-8.5A2.25 2.25 0 0 1 4.25 4h5a.75.75 0 0 1 0 1.5h-5Zm6.5-3a.75.75 0 0 1 .75-.75h3.5a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0V3.56l-4.22 4.22a.75.75 0 0 1-1.06-1.06l4.22-4.22h-2.19a.75.75 0 0 1-.75-.75Z" clipRule="evenodd" />
+                          </svg>
+                          Open in Notion
+                        </a>
+                      ) : (
+                        <button
+                          onClick={() => { handleNotionSync(); setOverflowOpen(false); }}
+                          disabled={notionSyncing}
+                          className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs text-neutral-600 transition-colors hover:bg-cream disabled:opacity-40"
+                        >
+                          <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M4.25 5.5a.75.75 0 0 0-.75.75v8.5c0 .414.336.75.75.75h8.5a.75.75 0 0 0 .75-.75v-4a.75.75 0 0 1 1.5 0v4A2.25 2.25 0 0 1 12.75 17h-8.5A2.25 2.25 0 0 1 2 14.75v-8.5A2.25 2.25 0 0 1 4.25 4h5a.75.75 0 0 1 0 1.5h-5Zm6.5-3a.75.75 0 0 1 .75-.75h3.5a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0V3.56l-4.22 4.22a.75.75 0 0 1-1.06-1.06l4.22-4.22h-2.19a.75.75 0 0 1-.75-.75Z" clipRule="evenodd" />
+                          </svg>
+                          {notionSyncing ? "Syncing…" : "Send to Notion"}
+                        </button>
+                      )}
 
                       {/* Original */}
                       <a

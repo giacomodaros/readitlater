@@ -16,6 +16,7 @@ interface ArticleCardProps {
   readAt?: string | null;
   ttr?: number | null;
   labels: Label[];
+  _count?: { highlights: number };
   selected?: boolean;
   onClick?: () => void;
 }
@@ -44,6 +45,7 @@ export default function ArticleCard({
   readAt,
   ttr,
   labels,
+  _count,
   selected,
   onClick,
 }: ArticleCardProps) {
@@ -86,8 +88,8 @@ export default function ArticleCard({
         )}
       </div>
 
-      {/* Bottom row: labels + TTR */}
-      {(labels.length > 0 || ttr) && (
+      {/* Bottom row: labels + highlights + TTR */}
+      {(labels.length > 0 || ttr || (_count?.highlights ?? 0) > 0) && (
         <div className="mt-2 flex items-center gap-1.5">
           {labels.length > 0 && (
             <span className="flex gap-1">
@@ -96,11 +98,19 @@ export default function ArticleCard({
               ))}
             </span>
           )}
-          {ttr && (
-            <span className="ml-auto shrink-0 text-[10px] text-neutral-300">
-              {ttr}m
-            </span>
-          )}
+          <span className="ml-auto flex shrink-0 items-center gap-1.5">
+            {(_count?.highlights ?? 0) > 0 && (
+              <span className="flex items-center gap-0.5 text-[10px] text-neutral-300">
+                <svg className="h-2.5 w-2.5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M3 4a1 1 0 0 1 1-1h12a1 1 0 1 1 0 2H4a1 1 0 0 1-1-1Zm0 4a1 1 0 0 1 1-1h12a1 1 0 1 1 0 2H4a1 1 0 0 1-1-1Zm0 4a1 1 0 0 1 1-1h6a1 1 0 1 1 0 2H4a1 1 0 0 1-1-1Z" clipRule="evenodd" />
+                </svg>
+                {_count!.highlights}
+              </span>
+            )}
+            {ttr && (
+              <span className="text-[10px] text-neutral-300">{ttr}m</span>
+            )}
+          </span>
         </div>
       )}
     </button>
