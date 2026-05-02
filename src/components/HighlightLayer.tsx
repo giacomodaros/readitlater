@@ -139,7 +139,18 @@ export default function HighlightLayer({ articleId, contentRef, originalHtml }: 
         if (sel) {
           setPendingSelection(sel);
           setPendingNote("");
-          setPopover({ x: e.clientX, y: e.clientY - 10 });
+
+          // Get the actual selection bounds instead of mouse coordinates
+          const selection = window.getSelection();
+          if (selection && selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0);
+            const rect = range.getBoundingClientRect();
+            // Position popover above the selection, centered on it
+            setPopover({
+              x: rect.left + rect.width / 2,
+              y: rect.top - 10
+            });
+          }
         } else {
           setPopover(null);
           setPendingSelection(null);
@@ -186,7 +197,7 @@ export default function HighlightLayer({ articleId, contentRef, originalHtml }: 
         <div
           ref={popoverRef}
           className="fixed z-50 flex flex-col gap-2 rounded-lg border border-cream-dark bg-cream p-2 shadow-lg"
-          style={{ left: popover.x - 100, top: popover.y - 80 }}
+          style={{ left: popover.x - 76, top: popover.y - 80 }}
         >
           <div className="flex gap-1.5">
             {COLORS.map((c) => (
