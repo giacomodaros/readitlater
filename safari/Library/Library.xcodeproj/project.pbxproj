@@ -37,6 +37,8 @@
 		7D7FDCA42FC4BEC4000CE876 /* popup.html in Resources */ = {isa = PBXBuildFile; fileRef = 7D7FDC9C2FC4BEC4000CE876 /* popup.html */; };
 		7D7FDCA52FC4BEC4000CE876 /* icons in Resources */ = {isa = PBXBuildFile; fileRef = 7D7FDC9D2FC4BEC4000CE876 /* icons */; };
 		7D7FDCA62FC4BEC4000CE876 /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 7D7FDC9E2FC4BEC4000CE876 /* manifest.json */; };
+		7D7FDD012FC4D901000CE876 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D7FDD002FC4D901000CE876 /* ShareViewController.swift */; };
+		7D7FDD082FC4D901000CE876 /* Library Share.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 7D7FDD072FC4D901000CE876 /* Library Share.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -54,6 +56,13 @@
 			remoteGlobalIDString = 7D7FDC752FC4BEC4000CE876;
 			remoteInfo = "Library Extension (macOS)";
 		};
+		7D7FDD092FC4D901000CE876 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7D7FDC3B2FC4BEC2000CE876 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7D7FDD062FC4D901000CE876;
+			remoteInfo = "Library Share (iOS)";
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -64,6 +73,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				7D7FDC6D2FC4BEC4000CE876 /* Library Extension.appex in Embed Foundation Extensions */,
+				7D7FDD082FC4D901000CE876 /* Library Share.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -107,6 +117,9 @@
 		7D7FDC9C2FC4BEC4000CE876 /* popup.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = popup.html; path = Resources/popup.html; sourceTree = "<group>"; };
 		7D7FDC9D2FC4BEC4000CE876 /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = Resources/icons; sourceTree = "<group>"; };
 		7D7FDC9E2FC4BEC4000CE876 /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = Resources/manifest.json; sourceTree = "<group>"; };
+		7D7FDD002FC4D901000CE876 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
+		7D7FDD022FC4D901000CE876 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		7D7FDD072FC4D901000CE876 /* Library Share.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Library Share.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -138,6 +151,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		7D7FDD052FC4D901000CE876 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -149,6 +169,7 @@
 				7D7FDC502FC4BEC3000CE876 /* iOS (App) */,
 				7D7FDC612FC4BEC4000CE876 /* macOS (App) */,
 				7D7FDC702FC4BEC4000CE876 /* iOS (Extension) */,
+				7D7FDD032FC4D901000CE876 /* iOS (Share Extension) */,
 				7D7FDC7A2FC4BEC4000CE876 /* macOS (Extension) */,
 				7D7FDC4F2FC4BEC3000CE876 /* Products */,
 			);
@@ -190,6 +211,7 @@
 				7D7FDC4E2FC4BEC3000CE876 /* Library.app */,
 				7D7FDC602FC4BEC4000CE876 /* Library.app */,
 				7D7FDC6C2FC4BEC4000CE876 /* Library Extension.appex */,
+				7D7FDD072FC4D901000CE876 /* Library Share.appex */,
 				7D7FDC762FC4BEC4000CE876 /* Library Extension.appex */,
 			);
 			name = Products;
@@ -233,6 +255,15 @@
 			path = "macOS (Extension)";
 			sourceTree = "<group>";
 		};
+		7D7FDD032FC4D901000CE876 /* iOS (Share Extension) */ = {
+			isa = PBXGroup;
+			children = (
+				7D7FDD002FC4D901000CE876 /* ShareViewController.swift */,
+				7D7FDD022FC4D901000CE876 /* Info.plist */,
+			);
+			path = "iOS (Share Extension)";
+			sourceTree = "<group>";
+		};
 		7D7FDC9A2FC4BEC4000CE876 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
@@ -261,6 +292,7 @@
 			);
 			dependencies = (
 				7D7FDC6F2FC4BEC4000CE876 /* PBXTargetDependency */,
+				7D7FDD0A2FC4D901000CE876 /* PBXTargetDependency */,
 			);
 			name = "Library (iOS)";
 			packageProductDependencies = (
@@ -328,6 +360,25 @@
 			productReference = 7D7FDC762FC4BEC4000CE876 /* Library Extension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		7D7FDD062FC4D901000CE876 /* Library Share (iOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7D7FDD0C2FC4D901000CE876 /* Build configuration list for PBXNativeTarget "Library Share (iOS)" */;
+			buildPhases = (
+				7D7FDD042FC4D901000CE876 /* Sources */,
+				7D7FDD052FC4D901000CE876 /* Frameworks */,
+				7D7FDD0B2FC4D901000CE876 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Library Share (iOS)";
+			packageProductDependencies = (
+			);
+			productName = "Library Share";
+			productReference = 7D7FDD072FC4D901000CE876 /* Library Share.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -350,6 +401,9 @@
 					7D7FDC752FC4BEC4000CE876 = {
 						CreatedOnToolsVersion = 26.5;
 					};
+					7D7FDD062FC4D901000CE876 = {
+						CreatedOnToolsVersion = 26.5;
+					};
 				};
 			};
 			buildConfigurationList = 7D7FDC3E2FC4BEC2000CE876 /* Build configuration list for PBXProject "Library" */;
@@ -369,6 +423,7 @@
 				7D7FDC4D2FC4BEC3000CE876 /* Library (iOS) */,
 				7D7FDC5F2FC4BEC4000CE876 /* Library (macOS) */,
 				7D7FDC6B2FC4BEC4000CE876 /* Library Extension (iOS) */,
+				7D7FDD062FC4D901000CE876 /* Library Share (iOS) */,
 				7D7FDC752FC4BEC4000CE876 /* Library Extension (macOS) */,
 			);
 		};
@@ -424,6 +479,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		7D7FDD0B2FC4D901000CE876 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -462,6 +524,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		7D7FDD042FC4D901000CE876 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7D7FDD012FC4D901000CE876 /* ShareViewController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -474,6 +544,11 @@
 			isa = PBXTargetDependency;
 			target = 7D7FDC752FC4BEC4000CE876 /* Library Extension (macOS) */;
 			targetProxy = 7D7FDC782FC4BEC4000CE876 /* PBXContainerItemProxy */;
+		};
+		7D7FDD0A2FC4D901000CE876 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7D7FDD062FC4D901000CE876 /* Library Share (iOS) */;
+			targetProxy = 7D7FDD092FC4D901000CE876 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -637,7 +712,7 @@
 				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Library Extension";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -671,7 +746,7 @@
 				INFOPLIST_FILE = "iOS (Extension)/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Library Extension";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -712,7 +787,7 @@
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -753,7 +828,7 @@
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -797,7 +872,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 10.14;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"-framework",
@@ -833,7 +908,7 @@
 					"@executable_path/../Frameworks",
 					"@executable_path/../../../../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 10.14;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"-framework",
@@ -872,7 +947,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 10.14;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"-framework",
@@ -914,7 +989,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 10.14;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"-framework",
@@ -932,6 +1007,71 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		7D7FDD0D2FC4D901000CE876 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = TTX7N83N6J;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "iOS (Share Extension)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Save to Library";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.giacomodaros.library.ShareExtension;
+				PRODUCT_NAME = "Library Share";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		7D7FDD0E2FC4D901000CE876 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = TTX7N83N6J;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "iOS (Share Extension)/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Save to Library";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.giacomodaros.library.ShareExtension;
+				PRODUCT_NAME = "Library Share";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
 			};
 			name = Release;
 		};
@@ -979,6 +1119,15 @@
 			buildConfigurations = (
 				7D7FDC982FC4BEC4000CE876 /* Debug */,
 				7D7FDC992FC4BEC4000CE876 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		7D7FDD0C2FC4D901000CE876 /* Build configuration list for PBXNativeTarget "Library Share (iOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7D7FDD0D2FC4D901000CE876 /* Debug */,
+				7D7FDD0E2FC4D901000CE876 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

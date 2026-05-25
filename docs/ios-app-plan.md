@@ -1,31 +1,41 @@
-# iOS/iPadOS App Plan
+# Native App
 
-The current native foundation is the Swift package at `ios/ReaderAPI`. It is not a full app yet. It gives a SwiftUI app typed access to the deployed web API.
+The Safari Xcode project now contains the first usable native app. It uses SwiftUI inside the generated iOS, iPadOS, and macOS container targets.
 
-## Recommended First App
+## Targets
 
-Build a SwiftUI universal iPhone/iPad app with:
+- `Library (iOS)`: iPhone/iPad app with login, article list, reader, add URL, archive, and sign out.
+- `Library (macOS)`: macOS app with the same native reader shell and embedded Safari extension.
+- `Library Extension (iOS)`: Safari Web Extension for iOS/iPadOS Safari.
+- `Library Extension (macOS)`: Safari Web Extension for macOS Safari.
+- `Library Share (iOS)`: iOS/iPadOS Share Extension that receives a URL and opens the main app to save it.
 
-- Login and register screens.
-- Keychain storage for the bearer token returned by `/api/auth/login`.
-- Sidebar or split-view article list on iPad.
-- Reader view that renders article HTML.
-- Save URL action from the share sheet.
-- Archive/delete/label support after the first usable version.
+## Test
 
-## How To Start In Xcode
+In Xcode, run:
 
-1. File > New > Project.
-2. Choose iOS > App.
-3. Product name: `Library`.
-4. Interface: SwiftUI.
-5. Minimum deployment: iOS 17.
-6. Add local package: `ios/ReaderAPI`.
+- `Library (macOS)` on `My Mac` to test the macOS app and Safari extension.
+- `Library (iOS)` on an iPhone/iPad simulator or device to test the native app and share sheet.
 
-The first screen should create a `ReaderAPIClient` with your deployed Vercel URL:
+The app talks to:
 
-```swift
-let client = ReaderAPIClient(baseURL: URL(string: "https://your-domain.vercel.app")!)
+```text
+https://readitlater-theta.vercel.app
 ```
 
-After login, store `response.token` in Keychain and pass it back into the client on app launch.
+## Share Sheet
+
+The share extension accepts web URLs and plain text URLs. It opens the main app with:
+
+```text
+library://save?url=<encoded-url>
+```
+
+The main app then saves the article using the signed-in account token.
+
+## Next Polish
+
+- Move token storage from `UserDefaults` to Keychain before shipping.
+- Add label editing and highlight viewing natively.
+- Add offline article caching.
+- Replace generated placeholder app icons.
