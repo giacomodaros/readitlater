@@ -1,0 +1,3 @@
+module ReaderAPI {
+    header "/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/include/ReaderAPI-Swift.h"
+}

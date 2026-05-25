@@ -1,8 +1,13 @@
-const API_URL = "https://readlater-pi.vercel.app/api/articles";
+const APP_ORIGIN = "https://readlater-pi.vercel.app";
+const API_URL = `${APP_ORIGIN}/api/articles`;
+const extensionAPI = globalThis.browser ?? globalThis.chrome;
 
 const urlDisplay = document.getElementById("url-display");
 const saveBtn = document.getElementById("save-btn");
 const status = document.getElementById("status");
+const openLink = document.getElementById("open-link");
+
+openLink.href = APP_ORIGIN;
 
 function showStatus(type, message) {
   status.className = "status " + type;
@@ -10,12 +15,12 @@ function showStatus(type, message) {
 }
 
 async function getCurrentTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const [tab] = await extensionAPI.tabs.query({ active: true, currentWindow: true });
   return tab;
 }
 
 async function getPageHtml(tabId) {
-  const results = await chrome.scripting.executeScript({
+  const results = await extensionAPI.scripting.executeScript({
     target: { tabId },
     func: () => document.documentElement.outerHTML,
   });
@@ -54,22 +59,23 @@ async function init() {
       const data = await res.json();
 
       if (res.status === 201) {
-        showStatus("success", "✓ Saved to Reader");
+        showStatus("success", "Saved");
         saveBtn.textContent = "Saved";
       } else if (res.ok) {
         // 200 = already existed
-        showStatus("already", "Already in your Reader");
+        showStatus("already", "Already saved");
         saveBtn.textContent = "Already saved";
       } else if (res.status === 401) {
-        showStatus("error", "Sign in to Reader first");
+        showStatus("error", "Sign in first");
         saveBtn.textContent = "Sign in required";
+        openLink.href = `${APP_ORIGIN}/login`;
       } else {
         throw new Error(data.error || "Failed to save");
       }
     } catch (e) {
       showStatus("error", e.message || "Something went wrong");
       saveBtn.disabled = false;
-      saveBtn.textContent = "Save to Reader";
+      saveBtn.textContent = "Save article";
     }
   });
 }

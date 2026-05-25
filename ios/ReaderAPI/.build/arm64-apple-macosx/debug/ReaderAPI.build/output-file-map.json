@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/primary.swiftdeps"
+  },
+  "/Users/giacomo/Documents/readitlater/ios/ReaderAPI/Sources/ReaderAPI/ReaderAPI.swift": {
+    "dependencies": "/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/ReaderAPI.d",
+    "object": "/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/ReaderAPI.swift.o",
+    "swiftmodule": "/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/ReaderAPI~partial.swiftmodule",
+    "swift-dependencies": "/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/ReaderAPI.swiftdeps",
+    "diagnostics": "/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/ReaderAPI.dia"
+  }
+}

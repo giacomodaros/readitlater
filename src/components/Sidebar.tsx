@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import clsx from "clsx";
+import AppearanceControls from "@/components/AppearanceControls";
 
 const NAV_ITEMS = [
   { label: "To Read", href: "/", icon: BookIcon },
@@ -56,22 +57,12 @@ export default function Sidebar() {
 
   return (
     <aside className="flex w-52 shrink-0 flex-col border-r border-cream-dark">
-      {/* Brand */}
-      <div className="px-5 pb-5 pt-5">
-        <Link href="/" className="block">
-          <span className="text-[15px] font-semibold tracking-tight text-neutral-900">Reader</span>
+      <div className="px-5 pb-4 pt-5">
+        <Link href="/" className="text-[13px] font-semibold uppercase tracking-widest text-neutral-500">
+          Library
         </Link>
-
-        {/* Accent stripes */}
-        <div className="mt-4 flex flex-col gap-[3px]">
-          <div className="h-[2px] rounded-full bg-brand-purple" />
-          <div className="h-[2px] rounded-full bg-brand-green" />
-          <div className="h-[2px] rounded-full bg-brand-blue" />
-          <div className="h-[2px] rounded-full bg-brand-orange" />
-        </div>
       </div>
 
-      {/* Navigation */}
       <nav className="flex flex-col gap-0.5 px-2">
         {NAV_ITEMS.map((item) => {
           const active = isActive(item.href);
@@ -92,6 +83,10 @@ export default function Sidebar() {
           );
         })}
       </nav>
+
+      <div className="mt-5 px-5">
+        <AppearanceControls />
+      </div>
 
       <div className="mt-auto border-t border-cream-dark px-5 py-4">
         {email && (

@@ -40,7 +40,7 @@ export default function AuthForm({ mode }: { mode: "login" | "register" }) {
       <div className="w-full max-w-sm">
         <div className="mb-8">
           <h1 className="text-2xl font-semibold tracking-tight text-neutral-950">
-            {mode === "login" ? "Sign in to Reader" : "Create your Reader account"}
+            {mode === "login" ? "Sign in" : "Create account"}
           </h1>
           <p className="mt-2 text-sm text-neutral-500">
             Save articles, organize labels, and keep your reading list private.

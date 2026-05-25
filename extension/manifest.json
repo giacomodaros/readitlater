@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Reader",
-  "description": "Save any article to your private Reader library.",
+  "name": "Save Article",
+  "description": "Save any article to your private library.",
   "version": "1.0.0",
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Save to Reader",
+    "default_title": "Save article",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

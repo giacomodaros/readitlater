@@ -1,0 +1,47 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "PackageStructure": ["<PackageStructure>"]
+  "ReaderAPI-arm64-apple-macosx-debug.module": ["<ReaderAPI-arm64-apple-macosx-debug.module>"]
+  "main": ["<ReaderAPI-arm64-apple-macosx-debug.module>"]
+  "test": ["<ReaderAPI-arm64-apple-macosx-debug.module>"]
+default: "main"
+nodes:
+  "/Users/giacomo/Documents/readitlater/ios/ReaderAPI/Sources/ReaderAPI/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+commands:
+  "/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/Sources/ReaderAPI/ReaderAPI.swift"]
+    outputs: ["/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/sources"]
+    description: "Write auxiliary file /Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/sources"
+
+  "/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Library/Developer/CommandLineTools/usr/bin/swiftc"]
+    outputs: ["/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+
+  "<ReaderAPI-arm64-apple-macosx-debug.module>":
+    tool: phony
+    inputs: ["/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/ReaderAPI.swift.o","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/Modules/ReaderAPI.swiftmodule"]
+    outputs: ["<ReaderAPI-arm64-apple-macosx-debug.module>"]
+
+  "C.ReaderAPI-arm64-apple-macosx-debug.module":
+    tool: shell
+    inputs: ["/Users/giacomo/Documents/readitlater/ios/ReaderAPI/Sources/ReaderAPI/ReaderAPI.swift","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/sources"]
+    outputs: ["/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/ReaderAPI.swift.o","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/Modules/ReaderAPI.swiftmodule"]
+    description: "Compiling Swift Module 'ReaderAPI' (1 sources)"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-module-name","ReaderAPI","-emit-dependencies","-emit-module","-emit-module-path","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/Modules/ReaderAPI.swiftmodule","-output-file-map","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/output-file-map.json","-parse-as-library","-incremental","-c","@/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/sources","-I","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/Modules","-target","arm64-apple-macosx14.0","-incremental","-enable-batch-mode","-serialize-diagnostics","-index-store-path","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/index/store","-Onone","-enable-testing","-j8","-DSWIFT_PACKAGE","-DDEBUG","-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE","-module-cache-path","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ModuleCache","-parseable-output","-parse-as-library","-emit-objc-header","-emit-objc-header-path","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/.build/arm64-apple-macosx/debug/ReaderAPI.build/include/ReaderAPI-Swift.h","-swift-version","5","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g","-Xcc","-isysroot","-Xcc","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-Xcc","-fPIC","-Xcc","-g","-package-name","readerapi"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/giacomo/Documents/readitlater/ios/ReaderAPI/Sources/ReaderAPI/","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/Package.swift","/Users/giacomo/Documents/readitlater/ios/ReaderAPI/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+

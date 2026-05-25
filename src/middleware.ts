@@ -7,6 +7,7 @@ const PUBLIC_API_PATHS = ["/api/auth/login", "/api/auth/register", "/api/auth/lo
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const hasSession = Boolean(req.cookies.get(SESSION_COOKIE)?.value);
+  const hasBearerToken = req.headers.get("authorization")?.toLowerCase().startsWith("bearer ") ?? false;
 
   if (PUBLIC_PATHS.includes(pathname) || PUBLIC_API_PATHS.includes(pathname)) {
     if (hasSession && PUBLIC_PATHS.includes(pathname)) {
@@ -15,7 +16,7 @@ export function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
-  if (!hasSession) {
+  if (!hasSession && !hasBearerToken) {
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "Sign in required" }, { status: 401 });
     }

@@ -1,4 +1,4 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "crypto";
 import { prisma } from "@/lib/db";
@@ -65,8 +65,17 @@ export function clearSessionCookie(res: NextResponse) {
   });
 }
 
+async function getRequestSessionToken() {
+  const cookieToken = (await cookies()).get(SESSION_COOKIE)?.value;
+  if (cookieToken) return cookieToken;
+
+  const authorization = (await headers()).get("authorization");
+  if (!authorization?.toLowerCase().startsWith("bearer ")) return null;
+  return authorization.slice("bearer ".length).trim();
+}
+
 export async function getCurrentUser(): Promise<AuthUser | null> {
-  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  const token = await getRequestSessionToken();
   if (!token) return null;
 
   const session = await prisma.session.findUnique({
@@ -93,7 +102,12 @@ export function authErrorResponse() {
 }
 
 export async function destroyCurrentSession(req: NextRequest) {
-  const token = req.cookies.get(SESSION_COOKIE)?.value;
+  const cookieToken = req.cookies.get(SESSION_COOKIE)?.value;
+  const authorization = req.headers.get("authorization");
+  const bearerToken = authorization?.toLowerCase().startsWith("bearer ")
+    ? authorization.slice("bearer ".length).trim()
+    : null;
+  const token = cookieToken ?? bearerToken;
   if (!token) return;
   await prisma.session.deleteMany({ where: { tokenHash: hashToken(token) } });
 }

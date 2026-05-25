@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import HighlightLayer from "./HighlightLayer";
 
 interface ArticleReaderProps {
@@ -20,6 +20,12 @@ const FONT_SIZE_CLASS = {
   lg: "prose-lg",
 };
 
+const FONT_FAMILY_CLASS = {
+  serif: "font-serif-body",
+  sans: "font-sans",
+  mono: "font-mono",
+};
+
 export default function ArticleReader({
   articleId,
   content,
@@ -31,6 +37,18 @@ export default function ArticleReader({
   fontSize = "md",
 }: ArticleReaderProps) {
   const contentRef = useRef<HTMLDivElement>(null);
+  const [fontFamily, setFontFamily] = useState<keyof typeof FONT_FAMILY_CLASS>("serif");
+
+  useEffect(() => {
+    function syncFont() {
+      const stored = localStorage.getItem("reader-font-family");
+      setFontFamily(stored === "sans" || stored === "mono" ? stored : "serif");
+    }
+
+    syncFont();
+    window.addEventListener("reader-appearance-change", syncFont);
+    return () => window.removeEventListener("reader-appearance-change", syncFont);
+  }, []);
 
   const byline = [
     author ? `By ${author}` : null,
@@ -59,7 +77,8 @@ export default function ArticleReader({
         <div
           ref={contentRef}
           className={[
-            "prose prose-neutral max-w-none font-serif-body",
+            "prose prose-neutral max-w-none",
+            FONT_FAMILY_CLASS[fontFamily],
             "prose-headings:tracking-tight",
             "prose-p:leading-[1.85] prose-p:text-neutral-800",
             "prose-a:text-brand-purple prose-a:no-underline hover:prose-a:underline",
