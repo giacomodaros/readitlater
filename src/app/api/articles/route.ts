@@ -10,6 +10,8 @@ export async function GET(req: NextRequest) {
     const archived = searchParams.get("archived");
     const labelId = searchParams.get("labelId");
     const search = searchParams.get("search");
+    const since = searchParams.get("since");
+    const sinceDate = since ? new Date(since) : null;
 
     const sort = searchParams.get("sort") ?? "newest";
     const orderBy =
@@ -22,6 +24,7 @@ export async function GET(req: NextRequest) {
       where: {
         userId: user.id,
         ...(archived !== null && { archived: archived === "true" }),
+        ...(sinceDate && !Number.isNaN(sinceDate.getTime()) && { updatedAt: { gt: sinceDate } }),
         ...(labelId && { labels: { some: { id: labelId } } }),
         ...(search && {
           OR: [

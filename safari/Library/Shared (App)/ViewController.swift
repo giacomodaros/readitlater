@@ -107,6 +107,7 @@ struct ArticleSummary: Codable, Identifiable, Hashable {
     let readAt: Date?
     let ttr: Int?
     let createdAt: Date
+    let updatedAt: Date?
     let labels: [ReaderLabel]
 }
 
@@ -122,6 +123,54 @@ struct Article: Codable, Identifiable {
     let ttr: Int?
     let archived: Bool
     let labels: [ReaderLabel]
+}
+
+struct CachedLibrary: Codable {
+    var articles: [ArticleSummary]
+    var details: [String: Article]
+    var updatedAt: Date
+}
+
+final class ArticleCache {
+    static let shared = ArticleCache()
+
+    private let decoder: JSONDecoder
+    private let encoder: JSONEncoder
+
+    private init() {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = ReaderAPI.makeDateDecodingStrategy()
+        self.decoder = decoder
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        self.encoder = encoder
+    }
+
+    func load(account: String, archived: Bool, search: String) -> CachedLibrary? {
+        guard search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let data = try? Data(contentsOf: fileURL(account: account, archived: archived)) else {
+            return nil
+        }
+        return try? decoder.decode(CachedLibrary.self, from: data)
+    }
+
+    func save(account: String, archived: Bool, articles: [ArticleSummary], details: [String: Article]) {
+        let payload = CachedLibrary(articles: articles, details: details, updatedAt: Date())
+        guard let data = try? encoder.encode(payload) else { return }
+        let url = fileURL(account: account, archived: archived)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+    }
+
+    private func fileURL(account: String, archived: Bool) -> URL {
+        let safeAccount = account
+            .lowercased()
+            .replacingOccurrences(of: "[^a-z0-9._-]", with: "_", options: .regularExpression)
+        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("LibraryReader", isDirectory: true)
+        return directory.appendingPathComponent("\(safeAccount)-\(archived ? "archive" : "library").json")
+    }
 }
 
 struct ServerError: Codable {
@@ -193,7 +242,12 @@ final class ReaderAPI {
         self.tokenStore = tokenStore
 
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .custom { decoder in
+        decoder.dateDecodingStrategy = Self.makeDateDecodingStrategy()
+        self.decoder = decoder
+    }
+
+    static func makeDateDecodingStrategy() -> JSONDecoder.DateDecodingStrategy {
+        .custom { decoder in
             let container = try decoder.singleValueContainer()
             let value = try container.decode(String.self)
 
@@ -206,7 +260,6 @@ final class ReaderAPI {
 
             throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid ISO-8601 date.")
         }
-        self.decoder = decoder
     }
 
     func login(email: String, password: String) async throws -> AuthResponse {
@@ -228,10 +281,13 @@ final class ReaderAPI {
         return response
     }
 
-    func articles(archived: Bool = false, search: String = "") async throws -> [ArticleSummary] {
+    func articles(archived: Bool = false, search: String = "", since: Date? = nil) async throws -> [ArticleSummary] {
         var items = [URLQueryItem(name: "archived", value: archived ? "true" : "false")]
         if !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             items.append(URLQueryItem(name: "search", value: search))
+        }
+        if let since {
+            items.append(URLQueryItem(name: "since", value: ISO8601DateFormatter().string(from: since)))
         }
         return try await send(path: "api/articles", queryItems: items)
     }
@@ -317,6 +373,8 @@ final class ReaderStore: ObservableObject {
 
     let api = ReaderAPI()
     let tokenStore = TokenStore.shared
+    private let cache = ArticleCache.shared
+    private var articleDetails: [String: Article] = [:]
 
     var isSignedIn: Bool {
         tokenStore.token != nil
@@ -325,6 +383,7 @@ final class ReaderStore: ObservableObject {
     func bootstrap() {
         consumePendingShareURL()
         guard isSignedIn else { return }
+        loadCachedArticles()
         Task { await loadArticles() }
     }
 
@@ -362,6 +421,7 @@ final class ReaderStore: ObservableObject {
         articles = []
         selectedArticle = nil
         selectedId = nil
+        articleDetails = [:]
     }
 
     func setTheme(_ value: ReaderTheme) {
@@ -386,15 +446,22 @@ final class ReaderStore: ObservableObject {
 
     func loadArticles() async {
         do {
+            let cached = loadCachedArticles()
             loading = true
             errorMessage = nil
-            articles = try await api.articles(archived: archived, search: search)
+            let incremental = cached != nil && search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let fetched = try await api.articles(archived: archived, search: search, since: incremental ? cached?.updatedAt : nil)
+            articles = incremental ? mergeSummaries(existing: articles, incoming: fetched) : fetched
             loading = false
+            saveCache()
             if selectedId == nil, let first = articles.first {
                 await select(first)
             } else if articles.isEmpty {
                 selectedArticle = nil
                 selectedId = nil
+            } else if let selectedId, !articles.contains(where: { $0.id == selectedId }) {
+                selectedArticle = nil
+                self.selectedId = nil
             }
         } catch {
             loading = false
@@ -403,9 +470,16 @@ final class ReaderStore: ObservableObject {
     }
 
     func select(_ article: ArticleSummary) async {
+        selectedId = article.id
+        if let cached = articleDetails[article.id] {
+            selectedArticle = cached
+        }
+
         do {
-            selectedId = article.id
-            selectedArticle = try await api.article(id: article.id)
+            let fetched = try await api.article(id: article.id)
+            articleDetails[article.id] = fetched
+            selectedArticle = fetched
+            saveCache()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -415,9 +489,11 @@ final class ReaderStore: ObservableObject {
         do {
             errorMessage = nil
             let saved = try await api.save(url: url)
+            articleDetails[saved.id] = saved
             await loadArticles()
             selectedId = saved.id
             selectedArticle = saved
+            saveCache()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -429,9 +505,51 @@ final class ReaderStore: ObservableObject {
             _ = try await api.setArchived(!article.archived, articleId: article.id)
             selectedArticle = nil
             selectedId = nil
+            articleDetails.removeValue(forKey: article.id)
             await loadArticles()
+            saveCache()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    private func loadCachedArticles() -> CachedLibrary? {
+        guard let account = tokenStore.email,
+              let cached = cache.load(account: account, archived: archived, search: search) else {
+            return nil
+        }
+        articleDetails.merge(cached.details) { current, _ in current }
+        if articles.isEmpty {
+            articles = cached.articles
+        }
+        if let selectedId, selectedArticle == nil {
+            selectedArticle = articleDetails[selectedId]
+        }
+        return cached
+    }
+
+    private func saveCache() {
+        guard let account = tokenStore.email,
+              search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        cache.save(account: account, archived: archived, articles: articles, details: articleDetails)
+    }
+
+    private func mergeSummaries(existing: [ArticleSummary], incoming: [ArticleSummary]) -> [ArticleSummary] {
+        guard !incoming.isEmpty else { return existing }
+
+        var byId = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        for article in incoming {
+            byId[article.id] = article
+        }
+
+        return byId.values.sorted {
+            if $0.createdAt != $1.createdAt {
+                return $0.createdAt > $1.createdAt
+            }
+            return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
         }
     }
 }
@@ -981,6 +1099,7 @@ struct ReaderDetailView: View {
 
                     HTMLText(
                         html: article.content,
+                        fallback: article.description,
                         theme: store.theme,
                         readerFont: store.readerFont,
                         textSize: store.textSize,
@@ -1243,13 +1362,16 @@ struct ScrollOffsetPreferenceKey: PreferenceKey {
 
 struct HTMLText: View {
     let html: String
+    let fallback: String?
     let theme: ReaderTheme
     let readerFont: ReaderFont
     let textSize: Double
     let lineSpacing: Double
 
     private var paragraphs: [String] {
-        ArticleTextExtractor.paragraphs(from: html)
+        let parsed = ArticleTextExtractor.paragraphs(from: html)
+        if !parsed.isEmpty { return parsed }
+        return ArticleTextExtractor.paragraphs(from: fallback ?? "")
     }
 
     var body: some View {
@@ -1272,6 +1394,9 @@ struct HTMLText: View {
 
 enum ArticleTextExtractor {
     static func paragraphs(from html: String) -> [String] {
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
         let source = html
             .replacingOccurrences(of: "</p>", with: "</p>\n\n", options: .caseInsensitive)
             .replacingOccurrences(of: "<br>", with: "<br>\n", options: .caseInsensitive)
@@ -1292,7 +1417,7 @@ enum ArticleTextExtractor {
             text = source.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
         }
 
-        return text
+        let paragraphs = text
             .replacingOccurrences(of: "\u{00a0}", with: " ")
             .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
             .replacingOccurrences(of: "\\n[ \\t]+", with: "\n", options: .regularExpression)
@@ -1300,5 +1425,18 @@ enum ArticleTextExtractor {
             .components(separatedBy: "\n\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+
+        if !paragraphs.isEmpty { return paragraphs }
+
+        let stripped = source
+            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return stripped.isEmpty ? [] : [stripped]
     }
 }
