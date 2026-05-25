@@ -801,6 +801,7 @@ struct CompactLibraryView: View {
 struct CompactReaderDestination: View {
     let summary: ArticleSummary
     @ObservedObject var store: ReaderStore
+    @Environment(\.dismiss) private var dismiss
     @State private var article: Article?
 
     var body: some View {
@@ -815,6 +816,35 @@ struct CompactReaderDestination: View {
                 ProgressView()
             }
         }
+        .overlay(alignment: .topLeading) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(store.theme.primary)
+                    .frame(width: 42, height: 42)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay {
+                        Circle().strokeBorder(store.theme.hairline)
+                    }
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 18)
+            .padding(.top, 10)
+        }
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 18, coordinateSpace: .local)
+                .onEnded { value in
+                    guard value.startLocation.x < 32,
+                          value.translation.width > 72,
+                          abs(value.translation.height) < 90 else {
+                        return
+                    }
+                    dismiss()
+                }
+        )
         .toolbar(.hidden, for: .navigationBar)
         .task(id: summary.id) {
             article = nil
@@ -930,12 +960,12 @@ struct ReaderDetailView: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             TrackableScrollView(onOffsetChange: updatePreferenceVisibility) {
-                VStack(alignment: .leading, spacing: 26) {
-                    VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 12) {
                         Text(article.title)
                             .font(.system(size: titleSize, weight: .bold, design: .default))
                             .foregroundStyle(store.theme.primary)
-                            .lineSpacing(2)
+                            .lineSpacing(3)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(byline.uppercased())
@@ -959,9 +989,9 @@ struct ReaderDetailView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.horizontal, horizontalPadding)
-                .padding(.top, 48)
-                .padding(.bottom, 112)
-                .frame(maxWidth: 880, alignment: .leading)
+                .padding(.top, topPadding)
+                .padding(.bottom, 118)
+                .frame(maxWidth: contentWidth, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
             .simultaneousGesture(
@@ -989,7 +1019,7 @@ struct ReaderDetailView: View {
         #if os(macOS)
         48
         #else
-        38
+        32
         #endif
     }
 
@@ -997,7 +1027,23 @@ struct ReaderDetailView: View {
         #if os(macOS)
         64
         #else
-        24
+        22
+        #endif
+    }
+
+    private var topPadding: CGFloat {
+        #if os(macOS)
+        48
+        #else
+        74
+        #endif
+    }
+
+    private var contentWidth: CGFloat {
+        #if os(macOS)
+        880
+        #else
+        720
         #endif
     }
 
@@ -1127,11 +1173,11 @@ struct ReaderSettingsPanel: View {
             }
 
             SettingsSection(title: "Font Size", value: "\(Int(store.textSize))", theme: store.theme) {
-                Slider(value: Binding(get: { store.textSize }, set: { store.setTextSize($0) }), in: 16...28, step: 1)
+                Slider(value: Binding(get: { store.textSize }, set: { store.setTextSize($0) }), in: 15...30, step: 1)
             }
 
             SettingsSection(title: "Line Spacing", value: "\(Int(store.lineSpacing))", theme: store.theme) {
-                Slider(value: Binding(get: { store.lineSpacing }, set: { store.setLineSpacing($0) }), in: 4...16, step: 1)
+                Slider(value: Binding(get: { store.lineSpacing }, set: { store.setLineSpacing($0) }), in: 2...18, step: 1)
             }
         }
     }
@@ -1202,28 +1248,57 @@ struct HTMLText: View {
     let textSize: Double
     let lineSpacing: Double
 
+    private var paragraphs: [String] {
+        ArticleTextExtractor.paragraphs(from: html)
+    }
+
     var body: some View {
-        if let attributed = try? AttributedString(
-            NSAttributedString(
-                data: Data(html.utf8),
-                options: [
-                    .documentType: NSAttributedString.DocumentType.html,
-                    .characterEncoding: String.Encoding.utf8.rawValue,
-                ],
-                documentAttributes: nil
-            )
-        ) {
-            Text(attributed)
-                .font(.system(size: textSize, weight: .regular, design: readerFont.design))
-                .foregroundStyle(theme.primary)
-                .lineSpacing(lineSpacing)
-                .textSelection(.enabled)
-        } else {
-            Text(html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression))
-                .font(.system(size: textSize, weight: .regular, design: readerFont.design))
-                .foregroundStyle(theme.primary)
-                .lineSpacing(lineSpacing)
-                .textSelection(.enabled)
+        VStack(alignment: .leading, spacing: paragraphSpacing) {
+            ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                Text(paragraph)
+                    .font(.system(size: textSize, weight: .regular, design: readerFont.design))
+                    .foregroundStyle(theme.primary)
+                    .lineSpacing(lineSpacing)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+
+    private var paragraphSpacing: CGFloat {
+        max(12, CGFloat(lineSpacing) + 8)
+    }
+}
+
+enum ArticleTextExtractor {
+    static func paragraphs(from html: String) -> [String] {
+        let source = html
+            .replacingOccurrences(of: "</p>", with: "</p>\n\n", options: .caseInsensitive)
+            .replacingOccurrences(of: "<br>", with: "<br>\n", options: .caseInsensitive)
+            .replacingOccurrences(of: "<br/>", with: "<br/>\n", options: .caseInsensitive)
+            .replacingOccurrences(of: "<br />", with: "<br />\n", options: .caseInsensitive)
+
+        let text: String
+        if let attributed = try? NSAttributedString(
+            data: Data(source.utf8),
+            options: [
+                .documentType: NSAttributedString.DocumentType.html,
+                .characterEncoding: String.Encoding.utf8.rawValue,
+            ],
+            documentAttributes: nil
+        ) {
+            text = attributed.string
+        } else {
+            text = source.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        }
+
+        return text
+            .replacingOccurrences(of: "\u{00a0}", with: " ")
+            .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\n[ \\t]+", with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: "\\n{3,}", with: "\n\n", options: .regularExpression)
+            .components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 }
