@@ -30,6 +30,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             return
         }
 
+        let sharedDefaults = UserDefaults(suiteName: appGroupIdentifier)
+        sharedDefaults?.set(articleURL.absoluteString, forKey: "reader.pendingShareURL")
         UserDefaults.standard.set(articleURL.absoluteString, forKey: "reader.pendingShareURL")
         NotificationCenter.default.post(name: .sharedArticleURLReceived, object: articleURL)
     }

@@ -20,6 +20,7 @@ typealias PlatformViewController = NSViewController
 
 let extensionBundleIdentifier = "com.giacomodaros.library.Extension"
 let appBaseURL = URL(string: "https://readitlater-theta.vercel.app")!
+let appGroupIdentifier = "group.com.giacomodaros.library"
 
 class ViewController: PlatformViewController {
     @IBOutlet var webView: WKWebView?
@@ -145,15 +146,32 @@ final class TokenStore {
     static let shared = TokenStore()
     private let tokenKey = "reader.auth.token"
     private let emailKey = "reader.auth.email"
+    private let defaults = UserDefaults(suiteName: appGroupIdentifier) ?? .standard
 
     var token: String? {
-        get { UserDefaults.standard.string(forKey: tokenKey) }
-        set { UserDefaults.standard.set(newValue, forKey: tokenKey) }
+        get {
+            if let token = defaults.string(forKey: tokenKey) {
+                return token
+            }
+            return UserDefaults.standard.string(forKey: tokenKey)
+        }
+        set {
+            defaults.set(newValue, forKey: tokenKey)
+            UserDefaults.standard.set(newValue, forKey: tokenKey)
+        }
     }
 
     var email: String? {
-        get { UserDefaults.standard.string(forKey: emailKey) }
-        set { UserDefaults.standard.set(newValue, forKey: emailKey) }
+        get {
+            if let email = defaults.string(forKey: emailKey) {
+                return email
+            }
+            return UserDefaults.standard.string(forKey: emailKey)
+        }
+        set {
+            defaults.set(newValue, forKey: emailKey)
+            UserDefaults.standard.set(newValue, forKey: emailKey)
+        }
     }
 
     func signOut() {
@@ -311,10 +329,15 @@ final class ReaderStore: ObservableObject {
     }
 
     func consumePendingShareURL() {
-        guard let rawURL = UserDefaults.standard.string(forKey: "reader.pendingShareURL"),
+        let sharedDefaults = UserDefaults(suiteName: appGroupIdentifier)
+        let rawPendingURL = sharedDefaults?.string(forKey: "reader.pendingShareURL")
+            ?? UserDefaults.standard.string(forKey: "reader.pendingShareURL")
+
+        guard let rawURL = rawPendingURL,
               let url = URL(string: rawURL) else {
             return
         }
+        sharedDefaults?.removeObject(forKey: "reader.pendingShareURL")
         UserDefaults.standard.removeObject(forKey: "reader.pendingShareURL")
         Task { await add(url: url.absoluteString) }
     }
@@ -547,6 +570,11 @@ struct ReaderRootView: View {
             guard let url = notification.object as? URL else { return }
             Task { await store.add(url: url.absoluteString) }
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            store.consumePendingShareURL()
+            guard store.isSignedIn else { return }
+            Task { await store.loadArticles() }
+        }
         #endif
     }
 }
@@ -613,33 +641,19 @@ struct LibraryView: View {
     @ObservedObject var store: ReaderStore
     @State private var addURL = ""
     @State private var showingAdd = false
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
-        GeometryReader { proxy in
-            HStack(spacing: 0) {
-                ArticleSidebar(store: store, showingAdd: $showingAdd)
-                    .frame(width: sidebarWidth(for: proxy.size.width))
-                    .background(store.theme.panel)
-                    .overlay(alignment: .trailing) {
-                        Rectangle()
-                            .fill(store.theme.hairline)
-                            .frame(width: 1)
-                    }
-
-                ZStack {
-                    store.theme.background
-                    if let article = store.selectedArticle {
-                        ReaderDetailView(article: article, store: store) {
-                            Task { await store.toggleArchive() }
-                        }
-                    } else {
-                        ContentUnavailableView("Select an article", systemImage: "doc.text")
-                            .foregroundStyle(store.theme.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Group {
+            #if os(iOS)
+            if horizontalSizeClass == .compact {
+                CompactLibraryView(store: store, showingAdd: $showingAdd)
+            } else {
+                splitLayout
             }
-            .background(store.theme.background)
+            #else
+            splitLayout
+            #endif
         }
         .alert("Add article", isPresented: $showingAdd) {
             TextField("https://example.com/article", text: $addURL)
@@ -672,10 +686,144 @@ struct LibraryView: View {
         .preferredColorScheme(store.theme.scheme)
     }
 
+    private var splitLayout: some View {
+        GeometryReader { proxy in
+            HStack(spacing: 0) {
+                ArticleSidebar(store: store, showingAdd: $showingAdd)
+                    .frame(width: sidebarWidth(for: proxy.size.width))
+                    .background(store.theme.panel)
+                    .overlay(alignment: .trailing) {
+                        Rectangle()
+                            .fill(store.theme.hairline)
+                            .frame(width: 1)
+                    }
+
+                ZStack {
+                    store.theme.background
+                    if let article = store.selectedArticle {
+                        ReaderDetailView(article: article, store: store) {
+                            Task { await store.toggleArchive() }
+                        }
+                    } else {
+                        ContentUnavailableView("Select an article", systemImage: "doc.text")
+                            .foregroundStyle(store.theme.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .background(store.theme.background)
+        }
+    }
+
     private func sidebarWidth(for width: CGFloat) -> CGFloat {
         min(max(width * 0.28, 260), 380)
     }
 }
+
+#if os(iOS)
+struct CompactLibraryView: View {
+    @ObservedObject var store: ReaderStore
+    @Binding var showingAdd: Bool
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                store.theme.background.ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(store.archived ? "Archive" : "Library")
+                                .font(.system(.largeTitle, design: .default, weight: .bold))
+                                .foregroundStyle(store.theme.primary)
+                            Text("\(store.articles.count) articles")
+                                .font(.title3)
+                                .foregroundStyle(store.theme.secondary)
+                        }
+
+                        Spacer()
+
+                        Button { showingAdd = true } label: {
+                            Image(systemName: "plus")
+                        }
+                        .font(.title2)
+
+                        Button {
+                            store.archived.toggle()
+                            Task { await store.loadArticles() }
+                        } label: {
+                            Image(systemName: store.archived ? "tray" : "archivebox")
+                        }
+                        .font(.title2)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 28)
+                    .padding(.bottom, 16)
+
+                    HStack {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(store.theme.secondary)
+                        TextField("Search", text: $store.search)
+                            .textFieldStyle(.plain)
+                            .font(.title3)
+                            .submitLabel(.search)
+                            .onSubmit { Task { await store.loadArticles() } }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 18)
+
+                    ScrollView {
+                        LazyVStack(spacing: 10) {
+                            ForEach(store.articles) { article in
+                                NavigationLink(value: article) {
+                                    ArticleRow(article: article, selected: false, theme: store.theme)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.bottom, 28)
+                    }
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(for: ArticleSummary.self) { article in
+                CompactReaderDestination(summary: article, store: store)
+            }
+        }
+    }
+}
+
+struct CompactReaderDestination: View {
+    let summary: ArticleSummary
+    @ObservedObject var store: ReaderStore
+    @State private var article: Article?
+
+    var body: some View {
+        ZStack {
+            store.theme.background.ignoresSafeArea()
+
+            if let article {
+                ReaderDetailView(article: article, store: store) {
+                    Task { await store.toggleArchive() }
+                }
+            } else {
+                ProgressView()
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .task(id: summary.id) {
+            article = nil
+            await store.select(summary)
+            article = store.selectedArticle
+        }
+    }
+}
+#endif
 
 struct ArticleSidebar: View {
     @ObservedObject var store: ReaderStore
