@@ -17,7 +17,7 @@ function faviconUrl(url: string): string {
   }
 }
 
-function absoluteUrl(value: string | null, baseUrl: string) {
+function absoluteUrl(value: string | null | undefined, baseUrl: string) {
   if (!value) return null;
   try {
     return new URL(value, baseUrl).toString();
