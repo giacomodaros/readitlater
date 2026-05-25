@@ -22,6 +22,8 @@ let extensionBundleIdentifier = "com.giacomodaros.library.Extension"
 let appBaseURL = URL(string: "https://readitlater-theta.vercel.app")!
 
 class ViewController: PlatformViewController {
+    @IBOutlet var webView: WKWebView?
+
     #if os(iOS)
     private var hostingController: UIHostingController<ReaderRootView>?
     #elseif os(macOS)
@@ -30,6 +32,7 @@ class ViewController: PlatformViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        webView?.removeFromSuperview()
 
         let root = ReaderRootView(store: ReaderStore())
 
@@ -271,6 +274,11 @@ final class ReaderStore: ObservableObject {
     @Published var password = ""
     @Published var name = ""
     @Published var errorMessage: String?
+    @Published var theme: ReaderTheme = ReaderTheme.load()
+    @Published var textSize: Double = {
+        let stored = UserDefaults.standard.double(forKey: "reader.native.textSize")
+        return stored == 0 ? 19 : stored
+    }()
 
     let api = ReaderAPI()
     let tokenStore = TokenStore.shared
@@ -314,6 +322,16 @@ final class ReaderStore: ObservableObject {
         articles = []
         selectedArticle = nil
         selectedId = nil
+    }
+
+    func setTheme(_ value: ReaderTheme) {
+        theme = value
+        UserDefaults.standard.set(value.rawValue, forKey: "reader.native.theme")
+    }
+
+    func setTextSize(_ value: Double) {
+        textSize = value
+        UserDefaults.standard.set(value, forKey: "reader.native.textSize")
     }
 
     func loadArticles() async {
@@ -371,6 +389,81 @@ final class ReaderStore: ObservableObject {
 enum AuthMode {
     case login
     case register
+}
+
+enum ReaderTheme: String, CaseIterable, Identifiable {
+    case offWhite
+    case darkGray
+    case oled
+
+    var id: String { rawValue }
+
+    static func load() -> ReaderTheme {
+        guard let raw = UserDefaults.standard.string(forKey: "reader.native.theme"),
+              let theme = ReaderTheme(rawValue: raw) else {
+            return .offWhite
+        }
+        return theme
+    }
+
+    var label: String {
+        switch self {
+        case .offWhite: "Paper"
+        case .darkGray: "Graphite"
+        case .oled: "OLED"
+        }
+    }
+
+    var background: Color {
+        switch self {
+        case .offWhite: Color(red: 0.972, green: 0.964, blue: 0.94)
+        case .darkGray: Color(red: 0.075, green: 0.075, blue: 0.08)
+        case .oled: .black
+        }
+    }
+
+    var panel: Color {
+        switch self {
+        case .offWhite: Color.white.opacity(0.72)
+        case .darkGray: Color(red: 0.13, green: 0.13, blue: 0.14).opacity(0.92)
+        case .oled: Color(red: 0.035, green: 0.035, blue: 0.04).opacity(0.96)
+        }
+    }
+
+    var selectedPanel: Color {
+        switch self {
+        case .offWhite: Color.black.opacity(0.08)
+        case .darkGray, .oled: Color.white.opacity(0.13)
+        }
+    }
+
+    var primary: Color {
+        switch self {
+        case .offWhite: Color(red: 0.08, green: 0.08, blue: 0.085)
+        case .darkGray, .oled: Color.white.opacity(0.95)
+        }
+    }
+
+    var secondary: Color {
+        switch self {
+        case .offWhite: Color.black.opacity(0.56)
+        case .darkGray, .oled: Color.white.opacity(0.62)
+        }
+    }
+
+    var hairline: Color {
+        switch self {
+        case .offWhite: Color.black.opacity(0.10)
+        case .darkGray, .oled: Color.white.opacity(0.12)
+        }
+    }
+
+    var scheme: ColorScheme {
+        switch self {
+        case .offWhite: .light
+        case .darkGray, .oled: .dark
+        }
+    }
 }
 
 struct ReaderRootView: View {
@@ -460,46 +553,31 @@ struct LibraryView: View {
     @State private var showingAdd = false
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $store.selectedId) {
-                ForEach(store.articles) { article in
-                    ArticleRow(article: article)
-                        .tag(article.id)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            Task { await store.select(article) }
-                        }
-                }
-            }
-            .navigationTitle(store.archived ? "Archive" : "Library")
-            .searchable(text: $store.search)
-            .onSubmit(of: .search) {
-                Task { await store.loadArticles() }
-            }
-            .toolbar {
-                ToolbarItemGroup {
-                    Button {
-                        showingAdd = true
-                    } label: {
-                        Label("Add", systemImage: "plus")
+        GeometryReader { proxy in
+            HStack(spacing: 0) {
+                ArticleSidebar(store: store, showingAdd: $showingAdd)
+                    .frame(width: sidebarWidth(for: proxy.size.width))
+                    .background(store.theme.panel)
+                    .overlay(alignment: .trailing) {
+                        Rectangle()
+                            .fill(store.theme.hairline)
+                            .frame(width: 1)
                     }
 
-                    Button {
-                        store.archived.toggle()
-                        Task { await store.loadArticles() }
-                    } label: {
-                        Label(store.archived ? "Library" : "Archive", systemImage: store.archived ? "tray" : "archivebox")
+                ZStack {
+                    store.theme.background
+                    if let article = store.selectedArticle {
+                        ReaderDetailView(article: article, store: store) {
+                            Task { await store.toggleArchive() }
+                        }
+                    } else {
+                        ContentUnavailableView("Select an article", systemImage: "doc.text")
+                            .foregroundStyle(store.theme.secondary)
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        } detail: {
-            if let article = store.selectedArticle {
-                ReaderDetailView(article: article) {
-                    Task { await store.toggleArchive() }
-                }
-            } else {
-                ContentUnavailableView("Select an article", systemImage: "doc.text")
-            }
+            .background(store.theme.background)
         }
         .alert("Add article", isPresented: $showingAdd) {
             TextField("https://example.com/article", text: $addURL)
@@ -512,8 +590,10 @@ struct LibraryView: View {
         }
         .toolbar {
             ToolbarItem {
-                Button("Sign out") {
+                Button {
                     store.signOut()
+                } label: {
+                    Label("Sign out", systemImage: "person.crop.circle.badge.xmark")
                 }
             }
         }
@@ -527,86 +607,267 @@ struct LibraryView: View {
                     .padding()
             }
         }
+        .preferredColorScheme(store.theme.scheme)
+    }
+
+    private func sidebarWidth(for width: CGFloat) -> CGFloat {
+        min(max(width * 0.28, 260), 380)
+    }
+}
+
+struct ArticleSidebar: View {
+    @ObservedObject var store: ReaderStore
+    @Binding var showingAdd: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(store.archived ? "Archive" : "Library")
+                        .font(.system(.title2, design: .default, weight: .bold))
+                        .foregroundStyle(store.theme.primary)
+                    Text("\(store.articles.count) articles")
+                        .font(.footnote)
+                        .foregroundStyle(store.theme.secondary)
+                }
+
+                Spacer()
+
+                Button { showingAdd = true } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+
+                Button {
+                    store.archived.toggle()
+                    Task { await store.loadArticles() }
+                } label: {
+                    Image(systemName: store.archived ? "tray" : "archivebox")
+                }
+                .buttonStyle(.borderless)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
+
+            HStack {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(store.theme.secondary)
+                TextField("Search", text: $store.search)
+                    .textFieldStyle(.plain)
+                    .onSubmit { Task { await store.loadArticles() } }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
+
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(store.articles) { article in
+                        ArticleRow(article: article, selected: store.selectedId == article.id, theme: store.theme)
+                            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .onTapGesture {
+                                Task { await store.select(article) }
+                            }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 20)
+            }
+        }
     }
 }
 
 struct ArticleRow: View {
     let article: ArticleSummary
+    let selected: Bool
+    let theme: ReaderTheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(article.title)
-                .font(.headline)
+                .font(.system(.headline, design: .default, weight: .semibold))
                 .lineLimit(2)
+                .foregroundStyle(theme.primary)
             if let description = article.description, !description.isEmpty {
                 Text(description)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(.system(.subheadline))
+                    .foregroundStyle(theme.secondary)
                     .lineLimit(2)
             }
             HStack(spacing: 6) {
-                if let siteName = article.siteName {
-                    Text(siteName)
-                }
-                if let ttr = article.ttr {
-                    Text("\(ttr) min")
-                }
+                if let siteName = article.siteName { Text(siteName) }
+                if let ttr = article.ttr { Text("\(ttr) min") }
             }
             .font(.caption)
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(theme.secondary.opacity(0.75))
         }
-        .padding(.vertical, 4)
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(selected ? theme.selectedPanel : Color.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
 struct ReaderDetailView: View {
     let article: Article
+    @ObservedObject var store: ReaderStore
     let onArchive: () -> Void
+    @State private var showPreferences = true
+    @State private var lastScrollY: CGFloat = 0
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(article.title)
-                        .font(.system(size: 34, weight: .bold, design: .serif))
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(byline)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
+        ZStack(alignment: .bottom) {
+            TrackableScrollView(onOffsetChange: updatePreferenceVisibility) {
+                VStack(alignment: .leading, spacing: 26) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text(article.title)
+                            .font(.system(size: titleSize, weight: .bold, design: .default))
+                            .foregroundStyle(store.theme.primary)
+                            .lineSpacing(2)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(byline.uppercased())
+                            .font(.system(.caption, design: .default, weight: .medium))
+                            .tracking(0.8)
+                            .foregroundStyle(store.theme.secondary)
+                            .textSelection(.enabled)
+                    }
+
+                    Rectangle()
+                        .fill(store.theme.hairline)
+                        .frame(height: 1)
+
+                    HTMLText(html: article.content, theme: store.theme, textSize: store.textSize)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Divider()
-                HTMLText(html: article.content)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, horizontalPadding)
+                .padding(.top, 48)
+                .padding(.bottom, 112)
+                .frame(maxWidth: 880, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
-            .padding(32)
-            .frame(maxWidth: 760, alignment: .leading)
+
+            PreferenceBar(store: store, article: article, onArchive: onArchive)
+                .padding(.bottom, 18)
+                .opacity(showPreferences ? 1 : 0)
+                .offset(y: showPreferences ? 0 : 34)
+                .animation(.spring(response: 0.36, dampingFraction: 0.86), value: showPreferences)
+                .allowsHitTesting(showPreferences)
         }
-        .toolbar {
-            ToolbarItemGroup {
-                Link(destination: URL(string: article.url)!) {
-                    Label("Original", systemImage: "safari")
-                }
-                Button(action: onArchive) {
-                    Label(article.archived ? "Unarchive" : "Archive", systemImage: "archivebox")
-                }
-            }
+        .background(store.theme.background)
+    }
+
+    private var titleSize: CGFloat {
+        #if os(macOS)
+        48
+        #else
+        38
+        #endif
+    }
+
+    private var horizontalPadding: CGFloat {
+        #if os(macOS)
+        64
+        #else
+        24
+        #endif
+    }
+
+    private func updatePreferenceVisibility(_ y: CGFloat) {
+        let delta = y - lastScrollY
+        if delta < -8 {
+            showPreferences = false
+        } else if delta > 8 || y > -20 {
+            showPreferences = true
         }
+        lastScrollY = y
     }
 
     private var byline: String {
-        [
-            article.author,
-            article.siteName,
-            article.ttr.map { "\($0) min read" },
-        ]
-        .compactMap { $0 }
-        .joined(separator: " · ")
+        [article.siteName, article.ttr.map { "\($0) min read" }, article.author]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+    }
+}
+
+struct PreferenceBar: View {
+    @ObservedObject var store: ReaderStore
+    let article: Article
+    let onArchive: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Picker("Theme", selection: Binding(get: { store.theme }, set: { store.setTheme($0) })) {
+                ForEach(ReaderTheme.allCases) { theme in
+                    Text(theme.label).tag(theme)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 280)
+
+            Divider().frame(height: 24)
+
+            Image(systemName: "textformat.size")
+                .foregroundStyle(store.theme.secondary)
+            Slider(value: Binding(get: { store.textSize }, set: { store.setTextSize($0) }), in: 16...24, step: 1)
+                .frame(width: 110)
+
+            Divider().frame(height: 24)
+
+            Button(action: onArchive) {
+                Label(article.archived ? "Unarchive" : "Archive", systemImage: "archivebox")
+            }
+
+            Link(destination: URL(string: article.url)!) {
+                Label("Original", systemImage: "safari")
+            }
+        }
+        .labelStyle(.iconOnly)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+        .overlay {
+            Capsule(style: .continuous)
+                .strokeBorder(store.theme.hairline)
+        }
+        .shadow(color: .black.opacity(store.theme == .offWhite ? 0.14 : 0.45), radius: 24, y: 12)
+        .padding(.horizontal, 20)
+    }
+}
+
+struct TrackableScrollView<Content: View>: View {
+    let onOffsetChange: (CGFloat) -> Void
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ScrollView {
+            GeometryReader { proxy in
+                Color.clear
+                    .preference(key: ScrollOffsetPreferenceKey.self, value: proxy.frame(in: .named("readerScroll")).minY)
+            }
+            .frame(height: 0)
+
+            content
+        }
+        .coordinateSpace(name: "readerScroll")
+        .onPreferenceChange(ScrollOffsetPreferenceKey.self, perform: onOffsetChange)
+    }
+}
+
+struct ScrollOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
 struct HTMLText: View {
     let html: String
+    let theme: ReaderTheme
+    let textSize: Double
 
     var body: some View {
         if let attributed = try? AttributedString(
@@ -620,13 +881,15 @@ struct HTMLText: View {
             )
         ) {
             Text(attributed)
-                .font(.system(.body, design: .serif))
-                .lineSpacing(7)
+                .font(.system(size: textSize, weight: .regular, design: .default))
+                .foregroundStyle(theme.primary)
+                .lineSpacing(textSize * 0.42)
                 .textSelection(.enabled)
         } else {
             Text(html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression))
-                .font(.system(.body, design: .serif))
-                .lineSpacing(7)
+                .font(.system(size: textSize, weight: .regular, design: .default))
+                .foregroundStyle(theme.primary)
+                .lineSpacing(textSize * 0.42)
                 .textSelection(.enabled)
         }
     }
