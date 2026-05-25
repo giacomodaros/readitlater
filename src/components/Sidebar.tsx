@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useState } from "react";
 import clsx from "clsx";
 
 const NAV_ITEMS = [
@@ -29,8 +30,23 @@ function ArchiveIcon({ className }: { className?: string }) {
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const currentView = searchParams.get("view");
+  const [email, setEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((res) => res.ok ? res.json() : null)
+      .then((data) => setEmail(data?.user?.email ?? null))
+      .catch(() => setEmail(null));
+  }, []);
+
+  async function handleSignOut() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.push("/login");
+    router.refresh();
+  }
 
   function isActive(href: string) {
     if (href === "/") return pathname === "/" && !currentView;
@@ -44,9 +60,6 @@ export default function Sidebar() {
       <div className="px-5 pb-5 pt-5">
         <Link href="/" className="block">
           <span className="text-[15px] font-semibold tracking-tight text-neutral-900">Reader</span>
-          <span className="mt-0.5 block text-[10px] font-medium uppercase tracking-widest text-neutral-400">
-            by Artifacts
-          </span>
         </Link>
 
         {/* Accent stripes */}
@@ -79,6 +92,20 @@ export default function Sidebar() {
           );
         })}
       </nav>
+
+      <div className="mt-auto border-t border-cream-dark px-5 py-4">
+        {email && (
+          <p className="mb-2 truncate text-[11px] text-neutral-400" title={email}>
+            {email}
+          </p>
+        )}
+        <button
+          onClick={handleSignOut}
+          className="text-xs font-medium text-neutral-500 hover:text-brand-purple"
+        >
+          Sign out
+        </button>
+      </div>
     </aside>
   );
 }

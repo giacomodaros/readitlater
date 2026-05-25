@@ -1,8 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, DM_Serif_Display, Source_Serif_4 } from "next/font/google";
-import { Suspense } from "react";
 import "./globals.css";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -31,7 +30,7 @@ const sourceSerif4 = Source_Serif_4({
 
 export const metadata: Metadata = {
   title: "Reader",
-  description: "Read-it-later by Artifacts",
+  description: "A private read-it-later library.",
 };
 
 export default function RootLayout({
@@ -54,14 +53,7 @@ export default function RootLayout({
             backgroundSize: "256px 256px",
           }}
         />
-        <div className="flex h-screen overflow-hidden">
-          <Suspense>
-            <Sidebar />
-          </Suspense>
-          <main className="flex-1 overflow-hidden">
-            {children}
-          </main>
-        </div>
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

@@ -1,34 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { Client } from "@notionhq/client";
+import { authErrorResponse, requireUser } from "@/lib/auth";
 
 type Ctx = { params: Promise<{ id: string }> };
 
 const DATABASE_ID = "6665244f-95cd-4197-8207-221ab2764b3b";
 
 export async function POST(_req: NextRequest, ctx: Ctx) {
-  const { id } = await ctx.params;
+  try {
+    const user = await requireUser();
+    const { id } = await ctx.params;
 
-  if (!process.env.NOTION_TOKEN) {
-    return NextResponse.json({ error: "Notion not configured" }, { status: 400 });
-  }
+    if (!process.env.NOTION_TOKEN) {
+      return NextResponse.json({ error: "Notion not configured" }, { status: 400 });
+    }
 
-  const article = await prisma.article.findUnique({
-    where: { id },
-    include: { labels: true },
-  });
-  if (!article) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
+    const article = await prisma.article.findFirst({
+      where: { id, userId: user.id },
+      include: { labels: true },
+    });
+    if (!article) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
 
-  // If already synced, return existing page URL
-  if (article.notionPageId) {
-    return NextResponse.json({ notionPageId: article.notionPageId });
-  }
+    if (article.notionPageId) {
+      return NextResponse.json({ notionPageId: article.notionPageId });
+    }
 
-  const notion = new Client({ auth: process.env.NOTION_TOKEN });
+    const notion = new Client({ auth: process.env.NOTION_TOKEN });
 
-  const page = await notion.pages.create({
+    const page = await notion.pages.create({
     parent: { database_id: DATABASE_ID },
     properties: {
       Name: { title: [{ text: { content: article.title } }] },
@@ -53,12 +55,16 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
         },
       }),
     },
-  });
+    });
 
-  await prisma.article.update({
-    where: { id },
-    data: { notionPageId: page.id },
-  });
+    await prisma.article.update({
+      where: { id },
+      data: { notionPageId: page.id },
+    });
 
-  return NextResponse.json({ notionPageId: page.id });
+    return NextResponse.json({ notionPageId: page.id });
+  } catch (e) {
+    if (e instanceof Error && e.message === "UNAUTHENTICATED") return authErrorResponse();
+    throw e;
+  }
 }

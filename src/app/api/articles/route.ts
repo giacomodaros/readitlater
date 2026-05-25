@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { extractArticle, extractFromHtml } from "@/lib/extractor";
+import { authErrorResponse, requireUser } from "@/lib/auth";
 
 export async function GET(req: NextRequest) {
   try {
+    const user = await requireUser();
     const { searchParams } = req.nextUrl;
     const archived = searchParams.get("archived");
     const labelId = searchParams.get("labelId");
@@ -18,6 +20,7 @@ export async function GET(req: NextRequest) {
 
     const articles = await prisma.article.findMany({
       where: {
+        userId: user.id,
         ...(archived !== null && { archived: archived === "true" }),
         ...(labelId && { labels: { some: { id: labelId } } }),
         ...(search && {
@@ -35,6 +38,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json(articles);
   } catch (e) {
+    if (e instanceof Error && e.message === "UNAUTHENTICATED") return authErrorResponse();
     const message = e instanceof Error ? e.message : "Database error";
     return NextResponse.json({ error: message }, { status: 500 });
   }
@@ -42,6 +46,7 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
+    const user = await requireUser();
     const body = await req.json();
     const { url, html } = body;
 
@@ -49,7 +54,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "URL is required" }, { status: 400 });
     }
 
-    const existing = await prisma.article.findUnique({ where: { url } });
+    const existing = await prisma.article.findUnique({ where: { userId_url: { userId: user.id, url } } });
     if (existing) {
       return NextResponse.json(existing);
     }
@@ -59,11 +64,12 @@ export async function POST(req: NextRequest) {
       : await extractArticle(url);
 
     const article = await prisma.article.create({
-      data,
+      data: { ...data, userId: user.id },
       include: { labels: true },
     });
     return NextResponse.json(article, { status: 201 });
   } catch (e) {
+    if (e instanceof Error && e.message === "UNAUTHENTICATED") return authErrorResponse();
     const message = e instanceof Error ? e.message : "Failed";
     return NextResponse.json({ error: message }, { status: 422 });
   }

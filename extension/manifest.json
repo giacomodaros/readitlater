@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Reader by Artifacts",
-  "description": "Save any article to your Reader with one click.",
+  "name": "Reader",
+  "description": "Save any article to your private Reader library.",
   "version": "1.0.0",
   "action": {
     "default_popup": "popup.html",

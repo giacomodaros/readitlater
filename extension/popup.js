@@ -46,6 +46,7 @@ async function init() {
 
       const res = await fetch(API_URL, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url, html }),
       });
@@ -59,6 +60,9 @@ async function init() {
         // 200 = already existed
         showStatus("already", "Already in your Reader");
         saveBtn.textContent = "Already saved";
+      } else if (res.status === 401) {
+        showStatus("error", "Sign in to Reader first");
+        saveBtn.textContent = "Sign in required";
       } else {
         throw new Error(data.error || "Failed to save");
       }

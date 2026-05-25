@@ -1,41 +1,42 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { syncHighlightToNotion } from "@/lib/notion";
+import { authErrorResponse, requireUser } from "@/lib/auth";
 
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function GET(_req: NextRequest, ctx: Ctx) {
-  const { id } = await ctx.params;
-  const highlights = await prisma.highlight.findMany({
-    where: { articleId: id },
-    orderBy: { startOffset: "asc" },
-  });
-  return NextResponse.json(highlights);
+  try {
+    const user = await requireUser();
+    const { id } = await ctx.params;
+    const article = await prisma.article.findFirst({ where: { id, userId: user.id }, select: { id: true } });
+    if (!article) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    const highlights = await prisma.highlight.findMany({
+      where: { articleId: id },
+      orderBy: { startOffset: "asc" },
+    });
+    return NextResponse.json(highlights);
+  } catch (e) {
+    if (e instanceof Error && e.message === "UNAUTHENTICATED") return authErrorResponse();
+    throw e;
+  }
 }
 
 export async function POST(req: NextRequest, ctx: Ctx) {
-  const { id } = await ctx.params;
-  const body = await req.json();
-  const { text, startOffset, endOffset, color, note } = body;
+  try {
+    const user = await requireUser();
+    const { id } = await ctx.params;
+    const body = await req.json();
+    const { text, startOffset, endOffset, color, note } = body;
 
-  if (typeof text !== "string" || typeof startOffset !== "number" || typeof endOffset !== "number") {
-    return NextResponse.json({ error: "Invalid highlight data" }, { status: 400 });
-  }
+    if (typeof text !== "string" || typeof startOffset !== "number" || typeof endOffset !== "number") {
+      return NextResponse.json({ error: "Invalid highlight data" }, { status: 400 });
+    }
 
-  const [highlight, article] = await Promise.all([
-    prisma.highlight.create({
-      data: {
-        articleId: id,
-        text,
-        startOffset,
-        endOffset,
-        ...(color && { color }),
-        ...(note && { note }),
-      },
-    }),
-    prisma.article.findUnique({
+    const article = await prisma.article.findUnique({
       where: { id },
       select: {
+        userId: true,
         title: true,
         url: true,
         author: true,
@@ -44,12 +45,24 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         notionPageId: true,
         labels: { select: { name: true } },
       },
-    }),
-  ]);
+    });
 
-  // Sync to Notion — create article page on first highlight, then append.
-  // Awaited so the notionPageId is persisted before the next highlight can race.
-  if (article) {
+    if (!article || article.userId !== user.id) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+
+    const highlight = await prisma.highlight.create({
+      data: {
+        articleId: id,
+        text,
+        startOffset,
+        endOffset,
+        ...(color && { color }),
+        ...(note && { note }),
+      },
+    });
+
+    // Sync to Notion, creating the article page on first highlight if needed.
     try {
       const notionPageId = await syncHighlightToNotion({
         notionPageId: article.notionPageId,
@@ -70,7 +83,10 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     } catch (err) {
       console.error("[Notion] Failed to sync highlight:", err);
     }
-  }
 
-  return NextResponse.json(highlight, { status: 201 });
+    return NextResponse.json(highlight, { status: 201 });
+  } catch (e) {
+    if (e instanceof Error && e.message === "UNAUTHENTICATED") return authErrorResponse();
+    throw e;
+  }
 }
