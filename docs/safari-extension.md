@@ -45,13 +45,13 @@ This creates an Xcode project containing a native app and Safari extension targe
 Update the production app URL in `extension/popup.js`:
 
 ```js
-const APP_ORIGIN = "https://your-domain.vercel.app";
+const APP_ORIGIN = "https://readitlater-theta.vercel.app";
 ```
 
 Update host permissions in `extension/manifest.json`:
 
 ```json
-"host_permissions": ["https://your-domain.vercel.app/*"]
+"host_permissions": ["https://readitlater-theta.vercel.app/*"]
 ```
 
 Safari extensions for iOS/iPadOS are distributed through the App Store as part of the containing native app.
