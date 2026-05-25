@@ -46,10 +46,12 @@ export async function createSession(userId: string) {
 }
 
 export function setSessionCookie(res: NextResponse, token: string, expiresAt: Date) {
+  const isProduction = process.env.NODE_ENV === "production";
+
   res.cookies.set(SESSION_COOKIE, token, {
     httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    sameSite: isProduction ? "none" : "lax",
+    secure: isProduction,
     path: "/",
     expires: expiresAt,
   });

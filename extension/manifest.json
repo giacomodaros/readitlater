@@ -17,6 +17,6 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "cookies"],
   "host_permissions": ["https://readitlater-theta.vercel.app/*"]
 }

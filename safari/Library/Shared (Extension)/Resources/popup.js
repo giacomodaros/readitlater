@@ -27,6 +27,20 @@ async function getPageHtml(tabId) {
   return results?.[0]?.result ?? null;
 }
 
+async function getSessionToken() {
+  if (!extensionAPI.cookies?.get) return null;
+
+  try {
+    const cookie = await extensionAPI.cookies.get({
+      url: APP_ORIGIN,
+      name: "reader_session",
+    });
+    return cookie?.value ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function init() {
   const tab = await getCurrentTab();
   const url = tab.url ?? "";
@@ -48,11 +62,17 @@ async function init() {
 
     try {
       const html = await getPageHtml(tab.id);
+      const sessionToken = await getSessionToken();
+      const headers = { "Content-Type": "application/json" };
+
+      if (sessionToken) {
+        headers.Authorization = `Bearer ${sessionToken}`;
+      }
 
       const res = await fetch(API_URL, {
         method: "POST",
         credentials: "include",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ url, html }),
       });
 
