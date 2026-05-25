@@ -62,6 +62,18 @@ class ViewController: PlatformViewController {
         ])
         #endif
     }
+
+    #if os(macOS)
+    override func viewDidAppear() {
+        super.viewDidAppear()
+
+        guard let window = view.window else { return }
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.styleMask.insert(.fullSizeContentView)
+        window.toolbarStyle = .unifiedCompact
+    }
+    #endif
 }
 
 struct ReaderUser: Codable {
@@ -279,6 +291,11 @@ final class ReaderStore: ObservableObject {
         let stored = UserDefaults.standard.double(forKey: "reader.native.textSize")
         return stored == 0 ? 19 : stored
     }()
+    @Published var lineSpacing: Double = {
+        let stored = UserDefaults.standard.double(forKey: "reader.native.lineSpacing")
+        return stored == 0 ? 8 : stored
+    }()
+    @Published var readerFont: ReaderFont = ReaderFont.load()
 
     let api = ReaderAPI()
     let tokenStore = TokenStore.shared
@@ -332,6 +349,16 @@ final class ReaderStore: ObservableObject {
     func setTextSize(_ value: Double) {
         textSize = value
         UserDefaults.standard.set(value, forKey: "reader.native.textSize")
+    }
+
+    func setLineSpacing(_ value: Double) {
+        lineSpacing = value
+        UserDefaults.standard.set(value, forKey: "reader.native.lineSpacing")
+    }
+
+    func setReaderFont(_ value: ReaderFont) {
+        readerFont = value
+        UserDefaults.standard.set(value.rawValue, forKey: "reader.native.font")
     }
 
     func loadArticles() async {
@@ -462,6 +489,41 @@ enum ReaderTheme: String, CaseIterable, Identifiable {
         switch self {
         case .offWhite: .light
         case .darkGray, .oled: .dark
+        }
+    }
+}
+
+enum ReaderFont: String, CaseIterable, Identifiable {
+    case system
+    case serif
+    case rounded
+    case monospaced
+
+    var id: String { rawValue }
+
+    static func load() -> ReaderFont {
+        guard let raw = UserDefaults.standard.string(forKey: "reader.native.font"),
+              let font = ReaderFont(rawValue: raw) else {
+            return .system
+        }
+        return font
+    }
+
+    var label: String {
+        switch self {
+        case .system: "SF"
+        case .serif: "Serif"
+        case .rounded: "Rounded"
+        case .monospaced: "Mono"
+        }
+    }
+
+    var design: Font.Design {
+        switch self {
+        case .system: .default
+        case .serif: .serif
+        case .rounded: .rounded
+        case .monospaced: .monospaced
         }
     }
 }
@@ -715,7 +777,7 @@ struct ReaderDetailView: View {
     @ObservedObject var store: ReaderStore
     let onArchive: () -> Void
     @State private var showPreferences = true
-    @State private var lastScrollY: CGFloat = 0
+    @State private var lastScrollY: CGFloat?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -739,7 +801,13 @@ struct ReaderDetailView: View {
                         .fill(store.theme.hairline)
                         .frame(height: 1)
 
-                    HTMLText(html: article.content, theme: store.theme, textSize: store.textSize)
+                    HTMLText(
+                        html: article.content,
+                        theme: store.theme,
+                        readerFont: store.readerFont,
+                        textSize: store.textSize,
+                        lineSpacing: store.lineSpacing
+                    )
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.horizontal, horizontalPadding)
@@ -748,8 +816,18 @@ struct ReaderDetailView: View {
                 .frame(maxWidth: 880, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { value in
+                        if value.translation.height < -10 {
+                            showPreferences = false
+                        } else if value.translation.height > 10 {
+                            showPreferences = true
+                        }
+                    }
+            )
 
-            PreferenceBar(store: store, article: article, onArchive: onArchive)
+            ReaderCommandBar(store: store, article: article, onArchive: onArchive)
                 .padding(.bottom, 18)
                 .opacity(showPreferences ? 1 : 0)
                 .offset(y: showPreferences ? 0 : 34)
@@ -776,13 +854,19 @@ struct ReaderDetailView: View {
     }
 
     private func updatePreferenceVisibility(_ y: CGFloat) {
-        let delta = y - lastScrollY
-        if delta < -8 {
+        guard let lastScrollY else {
+            self.lastScrollY = y
+            return
+        }
+
+        if y >= -4 {
+            showPreferences = true
+        } else if y < lastScrollY - 4 {
             showPreferences = false
-        } else if delta > 8 || y > -20 {
+        } else if y > lastScrollY + 4 {
             showPreferences = true
         }
-        lastScrollY = y
+        self.lastScrollY = y
     }
 
     private var byline: String {
@@ -792,48 +876,147 @@ struct ReaderDetailView: View {
     }
 }
 
-struct PreferenceBar: View {
+struct ReaderCommandBar: View {
     @ObservedObject var store: ReaderStore
     let article: Article
     let onArchive: () -> Void
+    @State private var showingSettings = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            Picker("Theme", selection: Binding(get: { store.theme }, set: { store.setTheme($0) })) {
-                ForEach(ReaderTheme.allCases) { theme in
-                    Text(theme.label).tag(theme)
-                }
+        HStack(spacing: 8) {
+            ShareLink(item: articleURL) {
+                Image(systemName: "square.and.arrow.up")
+                    .accessibilityLabel("Share")
             }
-            .pickerStyle(.segmented)
-            .frame(width: 280)
-
-            Divider().frame(height: 24)
-
-            Image(systemName: "textformat.size")
-                .foregroundStyle(store.theme.secondary)
-            Slider(value: Binding(get: { store.textSize }, set: { store.setTextSize($0) }), in: 16...24, step: 1)
-                .frame(width: 110)
-
-            Divider().frame(height: 24)
+            .buttonStyle(LiquidGlassIconButtonStyle(theme: store.theme))
 
             Button(action: onArchive) {
-                Label(article.archived ? "Unarchive" : "Archive", systemImage: "archivebox")
+                Image(systemName: article.archived ? "tray.and.arrow.up" : "archivebox")
+                    .accessibilityLabel(article.archived ? "Unarchive" : "Archive")
+            }
+            .buttonStyle(LiquidGlassIconButtonStyle(theme: store.theme))
+
+            Button {
+                showingSettings.toggle()
+            } label: {
+                Image(systemName: "textformat")
+                    .accessibilityLabel("Reader settings")
+            }
+            .buttonStyle(LiquidGlassIconButtonStyle(theme: store.theme))
+            .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
+                ReaderSettingsPanel(store: store)
+                    .frame(width: 340)
+                    .padding(18)
+                    .background(store.theme.background)
+                    .preferredColorScheme(store.theme.scheme)
+            }
+        }
+        .padding(8)
+        .background {
+            Capsule(style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    Capsule(style: .continuous)
+                        .strokeBorder(store.theme.hairline)
+                }
+                .shadow(color: .black.opacity(store.theme == .offWhite ? 0.16 : 0.55), radius: 28, y: 14)
+        }
+        .padding(.horizontal, 20)
+    }
+
+    private var articleURL: URL {
+        URL(string: article.url) ?? appBaseURL
+    }
+}
+
+struct LiquidGlassIconButtonStyle: ButtonStyle {
+    let theme: ReaderTheme
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 17, weight: .semibold, design: .default))
+            .foregroundStyle(theme.primary)
+            .frame(width: 44, height: 44)
+            .background {
+                Circle()
+                    .fill(theme == .offWhite ? Color.white.opacity(0.42) : Color.white.opacity(0.10))
+                    .overlay {
+                        Circle()
+                            .strokeBorder(theme.hairline)
+                    }
+            }
+            .scaleEffect(configuration.isPressed ? 0.92 : 1)
+            .opacity(configuration.isPressed ? 0.72 : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.82), value: configuration.isPressed)
+    }
+}
+
+struct ReaderSettingsPanel: View {
+    @ObservedObject var store: ReaderStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Reader")
+                .font(.system(.title3, design: .default, weight: .semibold))
+                .foregroundStyle(store.theme.primary)
+
+            SettingsSection(title: "Theme", theme: store.theme) {
+                Picker("Theme", selection: Binding(get: { store.theme }, set: { store.setTheme($0) })) {
+                    ForEach(ReaderTheme.allCases) { theme in
+                        Text(theme.label).tag(theme)
+                    }
+                }
+                .pickerStyle(.segmented)
             }
 
-            Link(destination: URL(string: article.url)!) {
-                Label("Original", systemImage: "safari")
+            SettingsSection(title: "Font", theme: store.theme) {
+                Picker("Font", selection: Binding(get: { store.readerFont }, set: { store.setReaderFont($0) })) {
+                    ForEach(ReaderFont.allCases) { font in
+                        Text(font.label).tag(font)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            SettingsSection(title: "Font Size", value: "\(Int(store.textSize))", theme: store.theme) {
+                Slider(value: Binding(get: { store.textSize }, set: { store.setTextSize($0) }), in: 16...28, step: 1)
+            }
+
+            SettingsSection(title: "Line Spacing", value: "\(Int(store.lineSpacing))", theme: store.theme) {
+                Slider(value: Binding(get: { store.lineSpacing }, set: { store.setLineSpacing($0) }), in: 4...16, step: 1)
             }
         }
-        .labelStyle(.iconOnly)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(.ultraThinMaterial, in: Capsule(style: .continuous))
-        .overlay {
-            Capsule(style: .continuous)
-                .strokeBorder(store.theme.hairline)
+    }
+}
+
+struct SettingsSection<Content: View>: View {
+    let title: String
+    var value: String?
+    let theme: ReaderTheme
+    @ViewBuilder let content: Content
+
+    init(title: String, value: String? = nil, theme: ReaderTheme, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.value = value
+        self.theme = theme
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title)
+                Spacer()
+                if let value {
+                    Text(value)
+                        .foregroundStyle(theme.secondary)
+                }
+            }
+            .font(.system(.footnote, design: .default, weight: .medium))
+            .foregroundStyle(theme.primary)
+
+            content
         }
-        .shadow(color: .black.opacity(store.theme == .offWhite ? 0.14 : 0.45), radius: 24, y: 12)
-        .padding(.horizontal, 20)
     }
 }
 
@@ -867,7 +1050,9 @@ struct ScrollOffsetPreferenceKey: PreferenceKey {
 struct HTMLText: View {
     let html: String
     let theme: ReaderTheme
+    let readerFont: ReaderFont
     let textSize: Double
+    let lineSpacing: Double
 
     var body: some View {
         if let attributed = try? AttributedString(
@@ -881,15 +1066,15 @@ struct HTMLText: View {
             )
         ) {
             Text(attributed)
-                .font(.system(size: textSize, weight: .regular, design: .default))
+                .font(.system(size: textSize, weight: .regular, design: readerFont.design))
                 .foregroundStyle(theme.primary)
-                .lineSpacing(textSize * 0.42)
+                .lineSpacing(lineSpacing)
                 .textSelection(.enabled)
         } else {
             Text(html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression))
-                .font(.system(size: textSize, weight: .regular, design: .default))
+                .font(.system(size: textSize, weight: .regular, design: readerFont.design))
                 .foregroundStyle(theme.primary)
-                .lineSpacing(textSize * 0.42)
+                .lineSpacing(lineSpacing)
                 .textSelection(.enabled)
         }
     }
