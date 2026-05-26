@@ -391,6 +391,7 @@ final class ReaderStore: ObservableObject {
     let tokenStore = TokenStore.shared
     private let cache = ArticleCache.shared
     private var articleDetails: [String: Article] = [:]
+    private var prefetchingArticleIds = Set<String>()
 
     var isSignedIn: Bool {
         tokenStore.token != nil
@@ -480,6 +481,7 @@ final class ReaderStore: ObservableObject {
                 selectedArticle = nil
                 self.selectedId = nil
             }
+            prefetchMissingArticles()
         } catch {
             loading = false
             errorMessage = error.localizedDescription
@@ -490,6 +492,7 @@ final class ReaderStore: ObservableObject {
         selectedId = article.id
         if let cached = articleDetails[article.id] {
             selectedArticle = cached
+            return
         } else {
             selectedArticle = Article(summary: article)
         }
@@ -501,6 +504,33 @@ final class ReaderStore: ObservableObject {
             saveCache()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func prefetchMissingArticles() {
+        guard search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        let missing = articles
+            .map(\.id)
+            .filter { articleDetails[$0] == nil && !prefetchingArticleIds.contains($0) }
+
+        guard !missing.isEmpty else { return }
+        prefetchingArticleIds.formUnion(missing)
+
+        Task {
+            for id in missing {
+                do {
+                    let fetched = try await api.article(id: id)
+                    articleDetails[id] = fetched
+                    if selectedId == id, selectedArticle?.url.isEmpty != false {
+                        selectedArticle = fetched
+                    }
+                    saveCache()
+                } catch {
+                    // Keep prefetch silent; explicit opens still surface errors.
+                }
+                prefetchingArticleIds.remove(id)
+            }
         }
     }
 
