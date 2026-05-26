@@ -52,6 +52,29 @@ final class ReaderHostingController: UIHostingController<ReaderRootView> {
         }
     }
 }
+
+struct NavigationGestureConfigurator: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> UIViewController {
+        GestureConfiguringViewController()
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        (uiViewController as? GestureConfiguringViewController)?.configure()
+    }
+
+    final class GestureConfiguringViewController: UIViewController {
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            configure()
+        }
+
+        func configure() {
+            guard let navigationController else { return }
+            navigationController.interactivePopGestureRecognizer?.isEnabled = true
+            navigationController.interactivePopGestureRecognizer?.delegate = nil
+        }
+    }
+}
 #elseif os(macOS)
 import Cocoa
 import SafariServices
@@ -72,6 +95,70 @@ extension View {
         #else
         self
         #endif
+    }
+
+    @ViewBuilder
+    func readerGlassIconButton(theme: ReaderTheme, prominent: Bool = false) -> some View {
+        self
+            .font(.system(size: 16, weight: .semibold, design: .default))
+            .buttonStyle(.plain)
+            .readerGlassPressAnimation()
+    }
+
+    @ViewBuilder
+    func readerGlassBarBackground(theme: ReaderTheme) -> some View {
+        if #available(iOS 26.0, macOS 26.0, *) {
+            self.background {
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        Capsule(style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
+                    }
+                    .shadow(color: .black.opacity(theme == .offWhite ? 0.12 : 0.42), radius: 24, y: 12)
+            }
+        } else {
+            self.background {
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        Capsule(style: .continuous)
+                            .strokeBorder(theme.hairline)
+                    }
+                    .shadow(color: .black.opacity(theme == .offWhite ? 0.16 : 0.55), radius: 28, y: 14)
+            }
+        }
+    }
+}
+
+struct ReaderGlassPressModifier: ViewModifier {
+    @GestureState private var isPressed = false
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(isPressed ? 0.93 : 1)
+            .opacity(isPressed ? 0.76 : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.78), value: isPressed)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .updating($isPressed) { _, state, _ in
+                        state = true
+                    }
+            )
+    }
+}
+
+extension View {
+    func readerGlassPressAnimation() -> some View {
+        modifier(ReaderGlassPressModifier())
+    }
+
+    @ViewBuilder
+    func readerGlassBarButton(theme: ReaderTheme) -> some View {
+        self
+            .font(.system(size: 16, weight: .semibold, design: .default))
+            .buttonStyle(.plain)
+            .readerGlassPressAnimation()
     }
 }
 
@@ -203,6 +290,27 @@ struct ArticleSummary: Codable, Identifiable, Hashable {
     let labels: [ReaderLabel]
 }
 
+extension ArticleSummary {
+    func updating(archived: Bool? = nil, readAt: Date?? = nil) -> ArticleSummary {
+        ArticleSummary(
+            id: id,
+            title: title,
+            author: author,
+            description: description,
+            siteName: siteName,
+            image: image,
+            favicon: favicon,
+            publishedAt: publishedAt,
+            archived: archived ?? self.archived,
+            readAt: readAt ?? self.readAt,
+            ttr: ttr,
+            createdAt: createdAt,
+            updatedAt: Date(),
+            labels: labels
+        )
+    }
+}
+
 struct Article: Codable, Identifiable {
     let id: String
     let url: String
@@ -232,6 +340,23 @@ extension Article {
         self.archived = summary.archived
         self.readAt = summary.readAt
         self.labels = summary.labels
+    }
+
+    func updating(archived: Bool? = nil, readAt: Date?? = nil) -> Article {
+        Article(
+            id: id,
+            url: url,
+            title: title,
+            author: author,
+            description: description,
+            content: content,
+            siteName: siteName,
+            publishedAt: publishedAt,
+            ttr: ttr,
+            archived: archived ?? self.archived,
+            readAt: readAt ?? self.readAt,
+            labels: labels
+        )
     }
 }
 
@@ -539,7 +664,10 @@ final class ReaderStore: ObservableObject {
     private let cache = ArticleCache.shared
     private var articleDetails: [String: Article] = [:]
     private var readingProgress: [String: Double] = [:]
+    private var persistedProgress: [String: Double] = [:]
     private var prefetchingArticleIds = Set<String>()
+    private var cacheSaveWorkItem: DispatchWorkItem?
+    private var markingReadArticleIds = Set<String>()
 
     var isSignedIn: Bool {
         tokenStore.token != nil
@@ -588,6 +716,9 @@ final class ReaderStore: ObservableObject {
         selectedId = nil
         articleDetails = [:]
         readingProgress = [:]
+        persistedProgress = [:]
+        markingReadArticleIds.removeAll()
+        cacheSaveWorkItem?.cancel()
     }
 
     func setTheme(_ value: ReaderTheme) {
@@ -610,14 +741,23 @@ final class ReaderStore: ObservableObject {
         UserDefaults.standard.set(value.rawValue, forKey: "reader.native.font")
     }
 
+    func setArchiveMode(_ value: Bool) {
+        guard archived != value else { return }
+        archived = value
+        search = ""
+        articles = []
+        selectedArticle = nil
+        selectedId = nil
+        loadCachedArticles()
+    }
+
     func loadArticles() async {
         do {
-            let cached = loadCachedArticles()
+            loadCachedArticles()
             loading = true
             errorMessage = nil
-            let incremental = cached != nil && search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            let fetched = try await api.articles(archived: archived, search: search, since: incremental ? cached?.updatedAt : nil)
-            articles = incremental ? mergeSummaries(existing: articles, incoming: fetched) : fetched
+            let fetched = try await api.articles(archived: archived, search: search)
+            articles = fetched
             loading = false
             saveCache()
             if selectedId == nil, let first = articles.first {
@@ -660,6 +800,7 @@ final class ReaderStore: ObservableObject {
         guard search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         let missing = articles
+            .prefix(6)
             .map(\.id)
             .filter { articleDetails[$0] == nil && !prefetchingArticleIds.contains($0) }
 
@@ -699,12 +840,27 @@ final class ReaderStore: ObservableObject {
 
     func toggleArchive() async {
         guard let article = selectedArticle else { return }
-        do {
-            _ = try await api.setArchived(!article.archived, articleId: article.id)
-            selectedArticle = nil
+        await setArchived(!article.archived, articleId: article.id)
+    }
+
+    func setArchived(_ archived: Bool, articleId: String) async {
+        guard let article = selectedArticle, article.id == articleId else { return }
+        let targetArchived = archived
+        let locallyUpdated = article.updating(archived: targetArchived)
+        selectedArticle = locallyUpdated
+        articleDetails[article.id] = locallyUpdated
+        articles = articles.map { summary in
+            summary.id == article.id ? summary.updating(archived: targetArchived) : summary
+        }
+        if self.archived != targetArchived {
+            articles.removeAll { $0.id == article.id }
             selectedId = nil
-            articleDetails.removeValue(forKey: article.id)
-            await loadArticles()
+        }
+        saveCache()
+        do {
+            let updated = try await api.setArchived(targetArchived, articleId: article.id)
+            articleDetails[article.id] = updated
+            selectedArticle = selectedArticle?.id == article.id ? updated : selectedArticle
             saveCache()
         } catch {
             errorMessage = error.localizedDescription
@@ -716,44 +872,122 @@ final class ReaderStore: ObservableObject {
     }
 
     func setRead(_ read: Bool, articleId: String) async {
+        let targetReadAt: Date? = read ? Date() : nil
+        articles = articles.compactMap { summary in
+            guard summary.id == articleId else { return summary }
+            let updated = summary.updating(readAt: .some(targetReadAt))
+            return updated
+        }
+        if let selectedArticle, selectedArticle.id == articleId {
+            self.selectedArticle = selectedArticle.updating(readAt: .some(targetReadAt))
+        }
+        if let detail = articleDetails[articleId] {
+            articleDetails[articleId] = detail.updating(readAt: .some(targetReadAt))
+        }
+        saveCache()
         do {
             let updated = try await api.setRead(read, articleId: articleId)
             articleDetails[articleId] = updated
-            selectedArticle = selectedId == articleId ? updated : selectedArticle
-            await loadArticles()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    func archive(_ summary: ArticleSummary) async {
-        do {
-            _ = try await api.setArchived(true, articleId: summary.id)
-            articleDetails.removeValue(forKey: summary.id)
-            await loadArticles()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    func delete(_ summary: ArticleSummary) async {
-        do {
-            try await api.deleteArticle(id: summary.id)
-            articles.removeAll { $0.id == summary.id }
-            articleDetails.removeValue(forKey: summary.id)
-            readingProgress.removeValue(forKey: summary.id)
-            if selectedId == summary.id {
-                selectedId = nil
-                selectedArticle = nil
-            }
+            selectedArticle = selectedArticle?.id == articleId ? updated : selectedArticle
             saveCache()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
+    func setArchived(_ targetArchived: Bool, summary: ArticleSummary) async {
+        let removedIndex = articles.firstIndex(where: { $0.id == summary.id })
+        let updatedSummary = summary.updating(archived: targetArchived)
+        articles.removeAll { $0.id == summary.id }
+        if let detail = articleDetails[summary.id] {
+            articleDetails[summary.id] = detail.updating(archived: targetArchived)
+        }
+        if selectedId == summary.id {
+            selectedId = nil
+            selectedArticle = nil
+        }
+        saveCache()
+        do {
+            let updated = try await api.setArchived(targetArchived, articleId: summary.id)
+            articleDetails[summary.id] = updated
+            saveCache()
+        } catch {
+            if let removedIndex, !articles.contains(where: { $0.id == summary.id }) {
+                articles.insert(summary, at: min(removedIndex, articles.count))
+            }
+            errorMessage = error.localizedDescription
+        }
+        if !targetArchived {
+            seedOppositeArchiveCache(with: updatedSummary)
+        }
+    }
+
+    func archive(_ summary: ArticleSummary) async {
+        await setArchived(true, summary: summary)
+    }
+
+    func unarchive(_ summary: ArticleSummary) async {
+        await setArchived(false, summary: summary)
+    }
+
+    func delete(_ summary: ArticleSummary) async {
+        let removedIndex = articles.firstIndex(where: { $0.id == summary.id })
+        let removedDetail = articleDetails[summary.id]
+        articles.removeAll { $0.id == summary.id }
+        articleDetails.removeValue(forKey: summary.id)
+        readingProgress.removeValue(forKey: summary.id)
+        persistedProgress.removeValue(forKey: summary.id)
+        if selectedId == summary.id {
+            selectedId = nil
+            selectedArticle = nil
+        }
+        saveCache()
+        do {
+            try await api.deleteArticle(id: summary.id)
+        } catch {
+            if let removedIndex, !articles.contains(where: { $0.id == summary.id }) {
+                articles.insert(summary, at: min(removedIndex, articles.count))
+            }
+            if let removedDetail {
+                articleDetails[summary.id] = removedDetail
+            }
+            saveCache()
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func delete(_ article: Article) async {
+        await delete(summary(for: article))
+    }
+
+    func setRead(_ read: Bool, article: Article) async {
+        await setRead(read, articleId: article.id)
+    }
+
     func progress(for articleId: String) -> Double {
         readingProgress[articleId] ?? 0
+    }
+
+    func summary(for article: Article) -> ArticleSummary {
+        if let summary = articles.first(where: { $0.id == article.id }) {
+            return summary
+        }
+        return ArticleSummary(
+            id: article.id,
+            title: article.title,
+            author: article.author,
+            description: article.description,
+            siteName: article.siteName,
+            image: nil,
+            favicon: nil,
+            publishedAt: article.publishedAt,
+            archived: article.archived,
+            readAt: article.readAt,
+            ttr: article.ttr,
+            createdAt: Date(),
+            updatedAt: nil,
+            labels: article.labels
+        )
     }
 
     func articleURL(for summary: ArticleSummary) -> URL {
@@ -765,8 +999,22 @@ final class ReaderStore: ObservableObject {
     }
 
     func setProgress(_ value: Double, articleId: String) {
-        readingProgress[articleId] = max(0, min(1, value))
-        saveCache()
+        let progress = max(0, min(1, value))
+        readingProgress[articleId] = progress
+        if abs((persistedProgress[articleId] ?? 0) - progress) >= 0.12 || progress >= 0.98 {
+            persistedProgress[articleId] = progress
+            saveCache()
+        }
+        if progress >= 0.985,
+           selectedArticle?.id == articleId,
+           selectedArticle?.readAt == nil,
+           !markingReadArticleIds.contains(articleId) {
+            markingReadArticleIds.insert(articleId)
+            Task {
+                await setRead(true, articleId: articleId)
+                markingReadArticleIds.remove(articleId)
+            }
+        }
     }
 
     @discardableResult
@@ -777,7 +1025,8 @@ final class ReaderStore: ObservableObject {
         }
         articleDetails.merge(cached.details) { current, _ in current }
         readingProgress.merge(cached.progress) { current, _ in current }
-        if articles.isEmpty {
+        persistedProgress.merge(cached.progress) { current, _ in current }
+        if search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             articles = cached.articles
         }
         if let selectedId, selectedArticle == nil {
@@ -791,7 +1040,37 @@ final class ReaderStore: ObservableObject {
               search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return
         }
-        cache.save(account: account, archived: archived, articles: articles, details: articleDetails, progress: readingProgress)
+        let isArchived = archived
+        let articlesSnapshot = articles
+        let detailsSnapshot = articleDetails
+        let progressSnapshot = readingProgress
+        cacheSaveWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
+            ArticleCache.shared.save(
+                account: account,
+                archived: isArchived,
+                articles: articlesSnapshot,
+                details: detailsSnapshot,
+                progress: progressSnapshot
+            )
+        }
+        cacheSaveWorkItem = workItem
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.18, execute: workItem)
+    }
+
+    private func seedOppositeArchiveCache(with summary: ArticleSummary) {
+        guard let account = tokenStore.email,
+              let inboxCache = cache.load(account: account, archived: false, search: "") else {
+            return
+        }
+        let merged = mergeSummaries(existing: inboxCache.articles, incoming: [summary])
+        cache.save(
+            account: account,
+            archived: false,
+            articles: merged,
+            details: articleDetails,
+            progress: readingProgress
+        )
     }
 
     private func mergeSummaries(existing: [ArticleSummary], incoming: [ArticleSummary]) -> [ArticleSummary] {
@@ -943,6 +1222,25 @@ enum ReaderFont: String, CaseIterable, Identifiable {
         case .monospaced: .monospaced
         }
     }
+
+    #if os(iOS)
+    func uiFont(size: CGFloat) -> UIFont {
+        switch self {
+        case .system:
+            return .systemFont(ofSize: size, weight: .regular)
+        case .serif:
+            let descriptor = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .body)
+                .withDesign(.serif) ?? UIFontDescriptor()
+            return UIFont(descriptor: descriptor, size: size)
+        case .rounded:
+            let descriptor = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .body)
+                .withDesign(.rounded) ?? UIFontDescriptor()
+            return UIFont(descriptor: descriptor, size: size)
+        case .monospaced:
+            return .monospacedSystemFont(ofSize: size, weight: .regular)
+        }
+    }
+    #endif
 }
 
 struct ReaderRootView: View {
@@ -1097,6 +1395,9 @@ struct LibraryView: View {
                     if let article = store.selectedArticle {
                         ReaderDetailView(article: article, store: store) {
                             Task { await store.toggleArchive() }
+                        } onDelete: {
+                            store.selectedArticle = nil
+                            store.selectedId = nil
                         }
                     } else {
                         ContentUnavailableView("Select an article", systemImage: "doc.text")
@@ -1144,8 +1445,7 @@ struct CompactLibraryView: View {
                         .font(.title2)
 
                         Button {
-                            store.archived.toggle()
-                            store.search = ""
+                            store.setArchiveMode(!store.archived)
                             Task { await store.loadArticles() }
                         } label: {
                             Image(systemName: store.archived ? "tray" : "archivebox")
@@ -1185,43 +1485,51 @@ struct CompactLibraryView: View {
                     .padding(.horizontal, 24)
                     .padding(.bottom, 18)
 
-                    ScrollView {
-                        LazyVStack(spacing: 10) {
-                            ForEach(store.articles) { article in
-                                NavigationLink(value: article) {
-                                    ArticleRow(article: article, selected: false, theme: store.theme, progress: store.progress(for: article.id))
-                                }
-                                .buttonStyle(.plain)
-                                .contextMenu {
-                                    articleMenu(article)
-                                }
-                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                    Button(role: .destructive) {
-                                        Task { await store.delete(article) }
-                                    } label: {
-                                        Label("Delete", systemImage: "trash")
-                                    }
-                                }
-                                .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                                    Button {
-                                        Task { await store.archive(article) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                    .tint(.blue)
-
-                                    Button {
-                                        Task { await store.toggleRead(article) }
-                                    } label: {
-                                        Label(article.readAt == nil ? "Read" : "Unread", systemImage: article.readAt == nil ? "checkmark.circle" : "circle")
-                                    }
-                                    .tint(.green)
+                    List {
+                        ForEach(store.articles) { article in
+                            NavigationLink(value: article) {
+                                ArticleRow(article: article, selected: false, theme: store.theme, progress: store.progress(for: article.id))
+                            }
+                            .buttonStyle(.plain)
+                            .listRowInsets(EdgeInsets(top: 5, leading: 18, bottom: 5, trailing: 18))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .contextMenu {
+                                articleMenu(article)
+                            }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    Task { await store.delete(article) }
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
                                 }
                             }
+                            .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                                Button {
+                                    Task {
+                                        if store.archived {
+                                            await store.unarchive(article)
+                                        } else {
+                                            await store.archive(article)
+                                        }
+                                    }
+                                } label: {
+                                    Label(store.archived ? "Unarchive" : "Archive", systemImage: store.archived ? "tray.and.arrow.up" : "archivebox")
+                                }
+                                .tint(.blue)
+
+                                Button {
+                                    Task { await store.toggleRead(article) }
+                                } label: {
+                                    Label(article.readAt == nil ? "Read" : "Unread", systemImage: article.readAt == nil ? "checkmark.circle" : "circle")
+                                }
+                                .tint(.green)
+                            }
                         }
-                        .padding(.horizontal, 18)
-                        .padding(.bottom, 28)
                     }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .background(Color.clear)
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -1252,9 +1560,15 @@ struct CompactLibraryView: View {
             Label(article.readAt == nil ? "Mark as Read" : "Mark as Unread", systemImage: article.readAt == nil ? "checkmark.circle" : "circle")
         }
         Button {
-            Task { await store.archive(article) }
+            Task {
+                if store.archived {
+                    await store.unarchive(article)
+                } else {
+                    await store.archive(article)
+                }
+            }
         } label: {
-            Label("Archive", systemImage: "archivebox")
+            Label(store.archived ? "Unarchive" : "Archive", systemImage: store.archived ? "tray.and.arrow.up" : "archivebox")
         }
         ShareLink(item: store.articleURL(for: article)) {
             Label("Share", systemImage: "square.and.arrow.up")
@@ -1283,6 +1597,9 @@ struct CompactReaderDestination: View {
                     chromeVisible = visible
                 }) {
                     Task { await store.toggleArchive() }
+                    dismiss()
+                } onDelete: {
+                    dismiss()
                 }
             } else {
                 ProgressView()
@@ -1293,15 +1610,11 @@ struct CompactReaderDestination: View {
                 dismiss()
             } label: {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(store.theme.primary)
-                    .frame(width: 42, height: 42)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay {
-                        Circle().strokeBorder(store.theme.hairline)
-                    }
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
             }
-            .buttonStyle(.plain)
+            .foregroundStyle(store.theme.primary)
+            .readerGlassIconButton(theme: store.theme)
             .padding(.leading, 18)
             .padding(.top, 10)
             .opacity(chromeVisible ? 1 : 0)
@@ -1312,6 +1625,8 @@ struct CompactReaderDestination: View {
         .contentShape(Rectangle())
         .toolbar(.hidden, for: .navigationBar)
         .readerSystemChromeHidden(!chromeVisible)
+        .background(NavigationGestureConfigurator().frame(width: 0, height: 0))
+        .simultaneousGesture(edgeBackGesture)
         .onAppear {
             postChromeVisibility(chromeVisible)
         }
@@ -1332,6 +1647,16 @@ struct CompactReaderDestination: View {
 
     private func postChromeVisibility(_ visible: Bool) {
         NotificationCenter.default.post(name: .readerChromeVisibilityChanged, object: visible)
+    }
+
+    private var edgeBackGesture: some Gesture {
+        DragGesture(minimumDistance: 18, coordinateSpace: .local)
+            .onEnded { value in
+                guard value.startLocation.x <= 28 else { return }
+                guard value.translation.width > 70 else { return }
+                guard abs(value.translation.height) < 80 else { return }
+                dismiss()
+            }
     }
 }
 #endif
@@ -1360,7 +1685,7 @@ struct ArticleSidebar: View {
                 .buttonStyle(.borderless)
 
                 Button {
-                    store.archived.toggle()
+                    store.setArchiveMode(!store.archived)
                     Task { await store.loadArticles() }
                 } label: {
                     Image(systemName: store.archived ? "tray" : "archivebox")
@@ -1408,32 +1733,37 @@ struct ArticleRow: View {
     let progress: Double
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Circle()
-                    .fill(article.readAt == nil ? Color.accentColor : theme.secondary.opacity(0.22))
-                    .frame(width: 8, height: 8)
-                Text(article.title)
-                    .font(.system(.headline, design: .default, weight: article.readAt == nil ? .semibold : .regular))
-                    .lineLimit(2)
-                    .foregroundStyle(theme.primary)
-            }
-            if let description = article.description, !description.isEmpty {
-                Text(description)
-                    .font(.system(.subheadline))
-                    .foregroundStyle(theme.secondary)
-                    .lineLimit(2)
-            }
-            HStack(spacing: 6) {
-                if let siteName = article.siteName { Text(siteName) }
-                if let ttr = article.ttr { Text("\(ttr) min") }
-            }
-            .font(.caption)
-            .foregroundStyle(theme.secondary.opacity(0.75))
-            if progress > 0 {
-                ProgressView(value: progress)
-                    .progressViewStyle(.linear)
-                    .tint(Color.accentColor.opacity(0.78))
+        HStack(alignment: .top, spacing: 11) {
+            ArticleFavicon(article: article, theme: theme)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Circle()
+                        .fill(article.readAt == nil ? Color.accentColor : theme.secondary.opacity(0.22))
+                        .frame(width: 8, height: 8)
+                    Text(article.title)
+                        .font(.system(.headline, design: .default, weight: article.readAt == nil ? .semibold : .regular))
+                        .lineLimit(2)
+                        .foregroundStyle(theme.primary)
+                }
+                if let description = article.description, !description.isEmpty {
+                    Text(description)
+                        .font(.system(.subheadline))
+                        .foregroundStyle(theme.secondary)
+                        .lineLimit(2)
+                }
+                HStack(spacing: 6) {
+                    if let siteName = article.siteName { Text(siteName) }
+                    if let ttr = article.ttr { Text("\(ttr) min") }
+                }
+                .font(.caption)
+                .foregroundStyle(theme.secondary.opacity(0.75))
+                if progress > 0 {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .tint(Color.accentColor.opacity(0.78))
+                }
             }
         }
         .padding(14)
@@ -1442,64 +1772,104 @@ struct ArticleRow: View {
     }
 }
 
+struct ArticleFavicon: View {
+    let article: ArticleSummary
+    let theme: ReaderTheme
+
+    var body: some View {
+        Group {
+            if let faviconURL {
+                AsyncImage(url: faviconURL) { image in
+                    image
+                        .resizable()
+                        .scaledToFit()
+                } placeholder: {
+                    fallback
+                }
+            } else {
+                fallback
+            }
+        }
+        .frame(width: 26, height: 26)
+        .padding(5)
+        .background(theme.panel.opacity(0.72), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(theme.hairline)
+        }
+    }
+
+    private var fallback: some View {
+        Text(siteInitial)
+            .font(.system(size: 13, weight: .bold, design: .default))
+            .foregroundStyle(theme.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var faviconURL: URL? {
+        guard let favicon = article.favicon, !favicon.isEmpty else { return nil }
+        return URL(string: favicon)
+    }
+
+    private var siteInitial: String {
+        String((article.siteName ?? article.title).prefix(1)).uppercased()
+    }
+}
+
 struct ReaderDetailView: View {
     let article: Article
     @ObservedObject var store: ReaderStore
     var onChromeVisibilityChange: ((Bool) -> Void)?
     let onArchive: () -> Void
+    let onDelete: () -> Void
     @State private var showPreferences = true
     @State private var lastScrollY: CGFloat?
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            TrackableScrollView(onOffsetChange: updatePreferenceVisibility) {
-                VStack(alignment: .leading, spacing: 24) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text(article.title)
-                            .font(.system(size: titleSize, weight: .bold, design: .default))
-                            .foregroundStyle(store.theme.primary)
-                            .lineSpacing(3)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(byline.uppercased())
-                            .font(.system(.caption, design: .default, weight: .medium))
-                            .tracking(0.8)
-                            .foregroundStyle(store.theme.secondary)
-                            .textSelection(.enabled)
-                    }
-
-                    Rectangle()
-                        .fill(store.theme.hairline)
-                        .frame(height: 1)
-
-                    HTMLText(
-                        html: article.content,
-                        fallback: article.description,
-                        theme: store.theme,
-                        readerFont: store.readerFont,
-                        textSize: store.textSize,
-                        lineSpacing: store.lineSpacing
-                    )
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(.horizontal, horizontalPadding)
-                .padding(.top, topPadding)
-                .padding(.bottom, 118)
-                .frame(maxWidth: contentWidth, alignment: .leading)
-                .frame(maxWidth: .infinity)
-            }
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 8)
-                    .onChanged { value in
-                        if value.translation.height < -10 {
-                            setChromeVisible(false)
-                        } else if value.translation.height > 10 {
-                            setChromeVisible(true)
+            GeometryReader { proxy in
+                let outerWidth = min(proxy.size.width, contentWidth)
+                let readableWidth = max(1, outerWidth - horizontalPadding * 2)
+                TrackableScrollView(onScrollChange: updatePreferenceVisibility) {
+                    VStack(alignment: .leading, spacing: 24) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(article.title)
+                                .font(.system(size: titleSize, weight: .bold, design: .default))
+                                .foregroundStyle(store.theme.primary)
+                                .lineSpacing(3)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(byline.uppercased())
+                                .font(.system(.caption, design: .default, weight: .medium))
+                                .tracking(0.8)
+                                .foregroundStyle(store.theme.secondary)
+                                .textSelection(.enabled)
                         }
-                    }
-            )
 
-            ReaderCommandBar(store: store, article: article, onArchive: onArchive)
+                        Rectangle()
+                            .fill(store.theme.hairline)
+                            .frame(height: 1)
+
+                        HTMLText(
+                            html: article.content,
+                            fallback: article.description,
+                            theme: store.theme,
+                            readerFont: store.readerFont,
+                            textSize: store.textSize,
+                            lineSpacing: store.lineSpacing
+                        )
+                            .frame(width: readableWidth, alignment: .leading)
+                    }
+                    .frame(width: readableWidth, alignment: .leading)
+                    .padding(.top, topPadding)
+                    .padding(.bottom, 118)
+                    .padding(.horizontal, horizontalPadding)
+                    .frame(width: outerWidth, alignment: .leading)
+                    .frame(maxWidth: .infinity)
+                }
+            }
+
+            ReaderCommandBar(store: store, article: article, onArchive: onArchive, onDelete: onDelete)
                 .padding(.bottom, 18)
                 .opacity(showPreferences ? 1 : 0)
                 .offset(y: showPreferences ? 0 : 34)
@@ -1547,20 +1917,23 @@ struct ReaderDetailView: View {
         #endif
     }
 
-    private func updatePreferenceVisibility(_ y: CGFloat) {
+    private func updatePreferenceVisibility(_ state: ReaderScrollState) {
+        let y = state.y
         guard let lastScrollY else {
             self.lastScrollY = y
+            setChromeVisible(y > -72)
+            store.setProgress(state.progress, articleId: article.id)
             return
         }
 
-        if y >= -4 {
+        if y >= -8 {
             setChromeVisible(true)
-        } else if y < lastScrollY - 4 {
+        } else if y < -72 || y < lastScrollY - 3 {
             setChromeVisible(false)
-        } else if y > lastScrollY + 4 {
+        } else if y > lastScrollY + 16 {
             setChromeVisible(true)
         }
-        store.setProgress(min(1, max(0, -y / 1400)), articleId: article.id)
+        store.setProgress(state.progress, articleId: article.id)
         self.lastScrollY = y
     }
 
@@ -1584,29 +1957,41 @@ struct ReaderCommandBar: View {
     @ObservedObject var store: ReaderStore
     let article: Article
     let onArchive: () -> Void
+    let onDelete: () -> Void
     @State private var showingSettings = false
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         HStack(spacing: 8) {
             ShareLink(item: articleURL) {
                 Image(systemName: "square.and.arrow.up")
+                    .frame(width: 38, height: 38)
+                    .contentShape(Circle())
                     .accessibilityLabel("Share")
             }
-            .buttonStyle(LiquidGlassIconButtonStyle(theme: store.theme))
+            .foregroundStyle(store.theme.primary)
+            .readerGlassBarButton(theme: store.theme)
 
             Button(action: onArchive) {
-                Image(systemName: article.archived ? "tray.and.arrow.up" : "archivebox")
-                    .accessibilityLabel(article.archived ? "Unarchive" : "Archive")
+                Image(systemName: currentArticle.archived ? "tray.and.arrow.up" : "archivebox")
+                    .frame(width: 38, height: 38)
+                    .contentShape(Circle())
+                    .accessibilityLabel(currentArticle.archived ? "Unarchive" : "Archive")
             }
-            .buttonStyle(LiquidGlassIconButtonStyle(theme: store.theme))
+            .foregroundStyle(store.theme.primary)
+            .readerGlassBarButton(theme: store.theme)
 
             Button {
                 showingSettings.toggle()
             } label: {
-                Image(systemName: "textformat")
+                Text("Aa")
+                    .font(.system(size: 18, weight: .semibold, design: .default))
+                    .frame(width: 38, height: 38)
+                    .contentShape(Circle())
                     .accessibilityLabel("Reader settings")
             }
-            .buttonStyle(LiquidGlassIconButtonStyle(theme: store.theme))
+            .foregroundStyle(store.theme.primary)
+            .readerGlassBarButton(theme: store.theme)
             #if os(iOS)
             .sheet(isPresented: $showingSettings) {
                 ReaderSettingsPanel(store: store)
@@ -1628,33 +2013,60 @@ struct ReaderCommandBar: View {
                     .preferredColorScheme(store.theme.scheme)
             }
             #endif
-        }
-        .padding(8)
-        .background {
-            Capsule(style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay {
-                    Capsule(style: .continuous)
-                        .strokeBorder(store.theme.hairline)
+
+            Menu {
+                Button {
+                    Task { await store.setRead(currentArticle.readAt == nil, article: currentArticle) }
+                } label: {
+                    Label(currentArticle.readAt == nil ? "Mark as Read" : "Mark as Unread", systemImage: currentArticle.readAt == nil ? "checkmark.circle" : "circle")
                 }
-                .shadow(color: .black.opacity(store.theme == .offWhite ? 0.16 : 0.55), radius: 28, y: 14)
+                Button {
+                    openURL(articleURL)
+                } label: {
+                    Label("Open in Browser", systemImage: "safari")
+                }
+                Button(role: .destructive) {
+                    Task {
+                        await store.delete(article)
+                        onDelete()
+                    }
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 38, height: 38)
+                    .contentShape(Circle())
+                    .accessibilityLabel("More")
+            }
+            .foregroundStyle(store.theme.primary)
+            .readerGlassBarButton(theme: store.theme)
         }
+        .font(.system(size: 16, weight: .semibold, design: .default))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .readerGlassBarBackground(theme: store.theme)
         .padding(.horizontal, 20)
     }
 
     private var articleURL: URL {
-        URL(string: article.url) ?? appBaseURL
+        URL(string: currentArticle.url) ?? appBaseURL
+    }
+
+    private var currentArticle: Article {
+        store.selectedArticle?.id == article.id ? (store.selectedArticle ?? article) : article
     }
 }
 
-struct LiquidGlassIconButtonStyle: ButtonStyle {
+struct FallbackGlassIconButtonStyle: ButtonStyle {
     let theme: ReaderTheme
+    var size: CGFloat = 44
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 17, weight: .semibold, design: .default))
             .foregroundStyle(theme.primary)
-            .frame(width: 44, height: 44)
+            .frame(width: size, height: size)
             .background {
                 Circle()
                     .fill(theme == .offWhite ? Color.white.opacity(0.42) : Color.white.opacity(0.10))
@@ -1738,22 +2150,45 @@ struct SettingsSection<Content: View>: View {
     }
 }
 
+struct ReaderScrollState: Equatable {
+    let y: CGFloat
+    let progress: Double
+}
+
 struct TrackableScrollView<Content: View>: View {
-    let onOffsetChange: (CGFloat) -> Void
+    let onScrollChange: (ReaderScrollState) -> Void
     @ViewBuilder let content: Content
 
     var body: some View {
-        ScrollView {
-            GeometryReader { proxy in
-                Color.clear
-                    .preference(key: ScrollOffsetPreferenceKey.self, value: proxy.frame(in: .named("readerScroll")).minY)
-            }
-            .frame(height: 0)
-
+        let scrollView = ScrollView {
+            legacyOffsetProbe
             content
         }
-        .coordinateSpace(name: "readerScroll")
-        .onPreferenceChange(ScrollOffsetPreferenceKey.self, perform: onOffsetChange)
+            .coordinateSpace(name: "readerScroll")
+
+        if #available(iOS 18.0, macOS 15.0, *) {
+            scrollView
+                .onScrollGeometryChange(for: ReaderScrollState.self) { geometry in
+                    let scrollableHeight = max(1, geometry.contentSize.height - geometry.containerSize.height)
+                    let progress = min(1, max(0, geometry.contentOffset.y / scrollableHeight))
+                    return ReaderScrollState(y: -geometry.contentOffset.y, progress: progress)
+                } action: { _, state in
+                    onScrollChange(state)
+                }
+        } else {
+            scrollView
+                .onPreferenceChange(ScrollOffsetPreferenceKey.self) { y in
+                    onScrollChange(ReaderScrollState(y: y, progress: min(1, max(0, -y / 1400))))
+                }
+        }
+    }
+
+    private var legacyOffsetProbe: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .preference(key: ScrollOffsetPreferenceKey.self, value: proxy.frame(in: .named("readerScroll")).minY)
+        }
+        .frame(height: 0)
     }
 }
 
@@ -1787,6 +2222,15 @@ struct HTMLText: View {
                     .foregroundStyle(theme.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
+                #if os(iOS)
+                SelectableArticleText(
+                    text: paragraphs.joined(separator: "\n\n"),
+                    theme: theme,
+                    readerFont: readerFont,
+                    textSize: textSize,
+                    lineSpacing: lineSpacing
+                )
+                #else
                 VStack(alignment: .leading, spacing: paragraphSpacing) {
                     ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, paragraph in
                         Text(paragraph)
@@ -1797,6 +2241,7 @@ struct HTMLText: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                #endif
             }
         }
     }
@@ -1805,6 +2250,219 @@ struct HTMLText: View {
         max(12, CGFloat(lineSpacing) + 8)
     }
 }
+
+#if os(iOS)
+struct SelectableArticleText: View {
+    let text: String
+    let theme: ReaderTheme
+    let readerFont: ReaderFont
+    let textSize: Double
+    let lineSpacing: Double
+    @State private var height: CGFloat = 1
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(1, proxy.size.width)
+            NativeSelectableTextView(
+                text: text,
+                theme: theme,
+                readerFont: readerFont,
+                textSize: textSize,
+                lineSpacing: lineSpacing,
+                availableWidth: width,
+                height: $height
+            )
+            .frame(width: width, height: height, alignment: .leading)
+        }
+        .frame(height: height)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct NativeSelectableTextView: UIViewRepresentable {
+    let text: String
+    let theme: ReaderTheme
+    let readerFont: ReaderFont
+    let textSize: Double
+    let lineSpacing: Double
+    let availableWidth: CGFloat
+    @Binding var height: CGFloat
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.delegate = context.coordinator
+        context.coordinator.textView = textView
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isScrollEnabled = false
+        textView.backgroundColor = .clear
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.textContainer.widthTracksTextView = true
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        textView.adjustsFontForContentSizeCategory = true
+        textView.dataDetectorTypes = [.link]
+        textView.addInteraction(UIContextMenuInteraction(delegate: context.coordinator))
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        let signature = "\(text.hashValue)-\(theme.rawValue)-\(readerFont.rawValue)-\(textSize)-\(lineSpacing)-\(availableWidth)"
+        if context.coordinator.signature != signature {
+            context.coordinator.signature = signature
+            textView.attributedText = attributedText
+        }
+        textView.textColor = UIColor(theme.primary)
+        textView.textContainer.size = CGSize(width: availableWidth, height: .greatestFiniteMagnitude)
+        recalculateHeight(textView)
+    }
+
+    private var attributedText: NSAttributedString {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = CGFloat(lineSpacing)
+        paragraphStyle.paragraphSpacing = max(12, CGFloat(lineSpacing) + 8)
+
+        return NSAttributedString(
+            string: text,
+            attributes: [
+                .font: readerFont.uiFont(size: CGFloat(textSize)),
+                .foregroundColor: UIColor(theme.primary),
+                .paragraphStyle: paragraphStyle,
+            ]
+        )
+    }
+
+    private func recalculateHeight(_ textView: UITextView) {
+        let width = max(1, availableWidth)
+        let size = textView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+        guard size.height.isFinite, abs(height - size.height) > 1 else { return }
+        DispatchQueue.main.async {
+            height = size.height
+        }
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate, UIContextMenuInteractionDelegate {
+        var parent: NativeSelectableTextView
+        var signature = ""
+        weak var textView: UITextView?
+
+        init(parent: NativeSelectableTextView) {
+            self.parent = parent
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            parent.recalculateHeight(textView)
+        }
+
+        func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
+            selectionMenu(for: textView, ranges: [NSValue(range: range)], suggestedActions: suggestedActions)
+        }
+
+        @available(iOS 26.0, *)
+        func textView(_ textView: UITextView, editMenuForTextInRanges ranges: [NSValue], suggestedActions: [UIMenuElement]) -> UIMenu? {
+            selectionMenu(for: textView, ranges: ranges, suggestedActions: suggestedActions)
+        }
+
+        func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+            guard let textView,
+                  let range = highlightedRange(in: textView, at: location) else {
+                return nil
+            }
+
+            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
+                let deleteHighlight = UIAction(
+                    title: "Delete Highlight",
+                    image: UIImage(systemName: "trash"),
+                    attributes: .destructive
+                ) { [weak self, weak textView] _ in
+                    guard let self, let textView else { return }
+                    self.deleteHighlight(in: textView, range: range)
+                }
+                return UIMenu(children: [deleteHighlight])
+            }
+        }
+
+        private func selectionMenu(for textView: UITextView, ranges: [NSValue], suggestedActions: [UIMenuElement]) -> UIMenu? {
+            let hasSelection = ranges.contains { $0.rangeValue.length > 0 } || textView.selectedRange.length > 0
+            guard hasSelection else {
+                if let highlightedRange = highlightedRange(in: textView, near: textView.selectedRange.location) {
+                    let deleteHighlight = UIAction(
+                        title: "Delete Highlight",
+                        image: UIImage(systemName: "trash"),
+                        attributes: .destructive
+                    ) { [weak textView] _ in
+                        guard let textView else { return }
+                        self.deleteHighlight(in: textView, range: highlightedRange)
+                    }
+                    return UIMenu(children: [deleteHighlight] + suggestedActions)
+                }
+                return UIMenu(children: suggestedActions)
+            }
+
+            let highlight = UIAction(
+                title: "Highlight",
+                image: UIImage(systemName: "highlighter")
+            ) { [weak textView] _ in
+                guard let textView else { return }
+                self.applyHighlight(to: textView, ranges: ranges)
+            }
+
+            return UIMenu(children: [highlight] + suggestedActions)
+        }
+
+        private func applyHighlight(to textView: UITextView, ranges: [NSValue]) {
+            let selected = ranges.map(\.rangeValue).filter { $0.length > 0 }
+            let targetRanges = selected.isEmpty && textView.selectedRange.length > 0 ? [textView.selectedRange] : selected
+            guard !targetRanges.isEmpty else { return }
+
+            let mutable = NSMutableAttributedString(attributedString: textView.attributedText)
+            for range in targetRanges where NSMaxRange(range) <= mutable.length {
+                mutable.addAttribute(.backgroundColor, value: UIColor.systemYellow.withAlphaComponent(0.42), range: range)
+            }
+            textView.attributedText = mutable
+            textView.selectedRange = targetRanges.last ?? .init(location: 0, length: 0)
+            parent.recalculateHeight(textView)
+        }
+
+        private func deleteHighlight(in textView: UITextView, range: NSRange) {
+            let mutable = NSMutableAttributedString(attributedString: textView.attributedText)
+            guard NSMaxRange(range) <= mutable.length else { return }
+            mutable.removeAttribute(.backgroundColor, range: range)
+            textView.attributedText = mutable
+            textView.selectedRange = NSRange(location: range.location, length: 0)
+            parent.recalculateHeight(textView)
+        }
+
+        private func highlightedRange(in textView: UITextView, near location: Int) -> NSRange? {
+            guard textView.attributedText.length > 0 else { return nil }
+            let index = min(max(location, 0), textView.attributedText.length - 1)
+            var effectiveRange = NSRange(location: 0, length: 0)
+            let color = textView.attributedText.attribute(.backgroundColor, at: index, effectiveRange: &effectiveRange)
+            return color == nil ? nil : effectiveRange
+        }
+
+        private func highlightedRange(in textView: UITextView, at point: CGPoint) -> NSRange? {
+            guard textView.attributedText.length > 0 else { return nil }
+            let containerPoint = CGPoint(
+                x: point.x - textView.textContainerInset.left,
+                y: point.y - textView.textContainerInset.top
+            )
+            let index = textView.layoutManager.characterIndex(
+                for: containerPoint,
+                in: textView.textContainer,
+                fractionOfDistanceBetweenInsertionPoints: nil
+            )
+            guard index < textView.attributedText.length else { return nil }
+            return highlightedRange(in: textView, near: index)
+        }
+    }
+}
+#endif
 
 enum ArticleTextExtractor {
     static func paragraphs(from html: String) -> [String] {

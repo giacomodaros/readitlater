@@ -23,9 +23,9 @@ export async function GET(req: NextRequest) {
 
     const visibilityWhere =
       mode === "inbox"
-        ? { archived: false, readAt: null }
+        ? { archived: false }
         : mode === "archive"
-          ? { OR: [{ archived: true }, { readAt: { not: null } }] }
+          ? { archived: true }
           : archived !== null
             ? { archived: archived === "true" }
             : {};
