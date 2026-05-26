@@ -125,6 +125,22 @@ struct Article: Codable, Identifiable {
     let labels: [ReaderLabel]
 }
 
+extension Article {
+    init(summary: ArticleSummary) {
+        self.id = summary.id
+        self.url = ""
+        self.title = summary.title
+        self.author = summary.author
+        self.description = summary.description
+        self.content = summary.description ?? ""
+        self.siteName = summary.siteName
+        self.publishedAt = summary.publishedAt
+        self.ttr = summary.ttr
+        self.archived = summary.archived
+        self.labels = summary.labels
+    }
+}
+
 struct CachedLibrary: Codable {
     var articles: [ArticleSummary]
     var details: [String: Article]
@@ -455,7 +471,8 @@ final class ReaderStore: ObservableObject {
             loading = false
             saveCache()
             if selectedId == nil, let first = articles.first {
-                await select(first)
+                selectedId = first.id
+                selectedArticle = articleDetails[first.id] ?? Article(summary: first)
             } else if articles.isEmpty {
                 selectedArticle = nil
                 selectedId = nil
@@ -473,6 +490,8 @@ final class ReaderStore: ObservableObject {
         selectedId = article.id
         if let cached = articleDetails[article.id] {
             selectedArticle = cached
+        } else {
+            selectedArticle = Article(summary: article)
         }
 
         do {
@@ -952,22 +971,52 @@ struct CompactReaderDestination: View {
             .padding(.top, 10)
         }
         .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 18, coordinateSpace: .local)
-                .onEnded { value in
-                    guard value.startLocation.x < 32,
-                          value.translation.width > 72,
-                          abs(value.translation.height) < 90 else {
-                        return
-                    }
-                    dismiss()
-                }
-        )
+        .overlay(alignment: .leading) {
+            EdgeSwipeDismissOverlay { dismiss() }
+                .frame(width: 28)
+        }
         .toolbar(.hidden, for: .navigationBar)
         .task(id: summary.id) {
-            article = nil
+            article = store.selectedArticle?.id == summary.id ? store.selectedArticle : Article(summary: summary)
             await store.select(summary)
-            article = store.selectedArticle
+            if store.selectedArticle?.id == summary.id {
+                article = store.selectedArticle
+            }
+        }
+    }
+}
+
+struct EdgeSwipeDismissOverlay: UIViewRepresentable {
+    let onDismiss: () -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.backgroundColor = .clear
+        let gesture = UIScreenEdgePanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleGesture(_:)))
+        gesture.edges = .left
+        view.addGestureRecognizer(gesture)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onDismiss: onDismiss)
+    }
+
+    final class Coordinator: NSObject {
+        private let onDismiss: () -> Void
+
+        init(onDismiss: @escaping () -> Void) {
+            self.onDismiss = onDismiss
+        }
+
+        @objc func handleGesture(_ gesture: UIScreenEdgePanGestureRecognizer) {
+            guard gesture.state == .ended,
+                  gesture.translation(in: gesture.view).x > 70 else {
+                return
+            }
+            onDismiss()
         }
     }
 }
@@ -1375,14 +1424,23 @@ struct HTMLText: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: paragraphSpacing) {
-            ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, paragraph in
-                Text(paragraph)
+        Group {
+            if paragraphs.isEmpty {
+                Text("No readable text was saved for this article.")
                     .font(.system(size: textSize, weight: .regular, design: readerFont.design))
-                    .foregroundStyle(theme.primary)
-                    .lineSpacing(lineSpacing)
-                    .textSelection(.enabled)
+                    .foregroundStyle(theme.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            } else {
+                VStack(alignment: .leading, spacing: paragraphSpacing) {
+                    ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                        Text(paragraph)
+                            .font(.system(size: textSize, weight: .regular, design: readerFont.design))
+                            .foregroundStyle(theme.primary)
+                            .lineSpacing(lineSpacing)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
         }
     }
@@ -1397,25 +1455,22 @@ enum ArticleTextExtractor {
         let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
-        let source = html
+        let source = trimmed
             .replacingOccurrences(of: "</p>", with: "</p>\n\n", options: .caseInsensitive)
+            .replacingOccurrences(of: "</div>", with: "</div>\n\n", options: .caseInsensitive)
+            .replacingOccurrences(of: "</section>", with: "</section>\n\n", options: .caseInsensitive)
+            .replacingOccurrences(of: "</article>", with: "</article>\n\n", options: .caseInsensitive)
+            .replacingOccurrences(of: "</li>", with: "</li>\n", options: .caseInsensitive)
             .replacingOccurrences(of: "<br>", with: "<br>\n", options: .caseInsensitive)
             .replacingOccurrences(of: "<br/>", with: "<br/>\n", options: .caseInsensitive)
             .replacingOccurrences(of: "<br />", with: "<br />\n", options: .caseInsensitive)
 
-        let text: String
-        if let attributed = try? NSAttributedString(
-            data: Data(source.utf8),
-            options: [
-                .documentType: NSAttributedString.DocumentType.html,
-                .characterEncoding: String.Encoding.utf8.rawValue,
-            ],
-            documentAttributes: nil
-        ) {
-            text = attributed.string
-        } else {
-            text = source.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
-        }
+        let text = decodeEntities(
+            source
+                .replacingOccurrences(of: "<script[\\s\\S]*?</script>", with: " ", options: [.regularExpression, .caseInsensitive])
+                .replacingOccurrences(of: "<style[\\s\\S]*?</style>", with: " ", options: [.regularExpression, .caseInsensitive])
+                .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+        )
 
         let paragraphs = text
             .replacingOccurrences(of: "\u{00a0}", with: " ")
@@ -1428,15 +1483,23 @@ enum ArticleTextExtractor {
 
         if !paragraphs.isEmpty { return paragraphs }
 
-        let stripped = source
-            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
-            .replacingOccurrences(of: "&nbsp;", with: " ")
-            .replacingOccurrences(of: "&amp;", with: "&")
-            .replacingOccurrences(of: "&quot;", with: "\"")
-            .replacingOccurrences(of: "&#39;", with: "'")
+        let stripped = decodeEntities(source.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression))
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         return stripped.isEmpty ? [] : [stripped]
+    }
+
+    private static func decodeEntities(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&#160;", with: " ")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#34;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
     }
 }

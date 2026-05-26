@@ -38,8 +38,7 @@ final class ShareViewController: UIViewController {
             guard let token = sharedToken() else {
                 storePending(url)
                 showFailure("Open Library and sign in.")
-                openContainingApp(with: url)
-                complete(after: 1.2)
+                complete(after: 1.6)
                 return
             }
 
@@ -47,12 +46,8 @@ final class ShareViewController: UIViewController {
             showSuccess("Saved")
             complete(after: 0.9)
         } catch {
-            showFailure("Couldn't save. Opening Library...")
-            if let url = try? await sharedURL() {
-                storePending(url)
-                openContainingApp(with: url)
-            }
-            complete(after: 1.2)
+            showFailure("Couldn't save. Try again in a moment.")
+            complete(after: 1.6)
         }
     }
 
@@ -133,6 +128,7 @@ final class ShareViewController: UIViewController {
 
     private func save(url: URL, token: String) async throws {
         var request = URLRequest(url: appOrigin.appendingPathComponent("/api/articles"))
+        request.timeoutInterval = 20
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
