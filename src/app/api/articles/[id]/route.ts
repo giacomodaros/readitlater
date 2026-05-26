@@ -15,9 +15,6 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
     if (!article) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
-    if (!article.readAt) {
-      await prisma.article.update({ where: { id }, data: { readAt: new Date() } });
-    }
     return NextResponse.json(article);
   } catch (e) {
     if (e instanceof Error && e.message === "UNAUTHENTICATED") return authErrorResponse();
@@ -35,6 +32,9 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
       data: {
         ...(typeof body.archived === "boolean" && { archived: body.archived }),
         ...(typeof body.title === "string" && { title: body.title }),
+        ...(body.readAt === null && { readAt: null }),
+        ...(body.readAt === true && { readAt: new Date() }),
+        ...(body.readAt === false && { readAt: null }),
       },
     });
     if (article.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });

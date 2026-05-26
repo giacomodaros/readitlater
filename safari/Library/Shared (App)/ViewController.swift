@@ -12,6 +12,46 @@ import WebKit
 #if os(iOS)
 import UIKit
 typealias PlatformViewController = UIViewController
+
+extension Notification.Name {
+    static let readerChromeVisibilityChanged = Notification.Name("readerChromeVisibilityChanged")
+}
+
+final class ReaderHostingController: UIHostingController<ReaderRootView> {
+    private var statusBarHidden = false
+    private var observer: NSObjectProtocol?
+
+    override var prefersStatusBarHidden: Bool {
+        statusBarHidden
+    }
+
+    override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
+        .slide
+    }
+
+    override var prefersHomeIndicatorAutoHidden: Bool {
+        statusBarHidden
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        observer = NotificationCenter.default.addObserver(
+            forName: .readerChromeVisibilityChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let visible = notification.object as? Bool else { return }
+            self?.statusBarHidden = !visible
+            self?.setNeedsStatusBarAppearanceUpdate()
+        }
+    }
+
+    deinit {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+}
 #elseif os(macOS)
 import Cocoa
 import SafariServices
@@ -22,11 +62,26 @@ let extensionBundleIdentifier = "com.giacomodaros.library.Extension"
 let appBaseURL = URL(string: "https://readitlater-theta.vercel.app")!
 let appGroupIdentifier = "group.com.giacomodaros.library"
 
+extension View {
+    @ViewBuilder
+    func readerSystemChromeHidden(_ hidden: Bool) -> some View {
+        #if os(iOS)
+        self
+            .statusBarHidden(hidden)
+            .persistentSystemOverlays(hidden ? .hidden : .automatic)
+        #else
+        self
+        #endif
+    }
+}
+
 class ViewController: PlatformViewController {
     @IBOutlet var webView: WKWebView?
 
     #if os(iOS)
-    private var hostingController: UIHostingController<ReaderRootView>?
+    private var hostingController: ReaderHostingController?
+    private var statusBarHidden = false
+    private var statusBarObserver: NSObjectProtocol?
     #elseif os(macOS)
     private var hostingView: NSHostingView<ReaderRootView>?
     #endif
@@ -38,7 +93,7 @@ class ViewController: PlatformViewController {
         let root = ReaderRootView(store: ReaderStore())
 
         #if os(iOS)
-        let hosting = UIHostingController(rootView: root)
+        let hosting = ReaderHostingController(rootView: root)
         hostingController = hosting
         addChild(hosting)
         view.addSubview(hosting.view)
@@ -50,6 +105,15 @@ class ViewController: PlatformViewController {
             hosting.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         hosting.didMove(toParent: self)
+        statusBarObserver = NotificationCenter.default.addObserver(
+            forName: .readerChromeVisibilityChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let visible = notification.object as? Bool else { return }
+            self?.statusBarHidden = !visible
+            self?.setNeedsStatusBarAppearanceUpdate()
+        }
         #elseif os(macOS)
         let hosting = NSHostingView(rootView: root)
         hostingView = hosting
@@ -63,6 +127,34 @@ class ViewController: PlatformViewController {
         ])
         #endif
     }
+
+    #if os(iOS)
+    override var prefersStatusBarHidden: Bool {
+        statusBarHidden
+    }
+
+    override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
+        .slide
+    }
+
+    override var prefersHomeIndicatorAutoHidden: Bool {
+        statusBarHidden
+    }
+
+    override var childForStatusBarHidden: UIViewController? {
+        hostingController
+    }
+
+    override var childForStatusBarStyle: UIViewController? {
+        hostingController
+    }
+
+    deinit {
+        if let statusBarObserver {
+            NotificationCenter.default.removeObserver(statusBarObserver)
+        }
+    }
+    #endif
 
     #if os(macOS)
     override func viewDidAppear() {
@@ -122,6 +214,7 @@ struct Article: Codable, Identifiable {
     let publishedAt: Date?
     let ttr: Int?
     let archived: Bool
+    let readAt: Date?
     let labels: [ReaderLabel]
 }
 
@@ -137,14 +230,42 @@ extension Article {
         self.publishedAt = summary.publishedAt
         self.ttr = summary.ttr
         self.archived = summary.archived
+        self.readAt = summary.readAt
         self.labels = summary.labels
     }
+}
+
+struct Highlight: Codable, Identifiable, Hashable {
+    let id: String
+    let articleId: String
+    let text: String
+    let startOffset: Int
+    let endOffset: Int
+    let color: String
+    let note: String?
+    let createdAt: Date
 }
 
 struct CachedLibrary: Codable {
     var articles: [ArticleSummary]
     var details: [String: Article]
+    var progress: [String: Double]
     var updatedAt: Date
+
+    init(articles: [ArticleSummary], details: [String: Article], progress: [String: Double], updatedAt: Date) {
+        self.articles = articles
+        self.details = details
+        self.progress = progress
+        self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        articles = try container.decode([ArticleSummary].self, forKey: .articles)
+        details = try container.decode([String: Article].self, forKey: .details)
+        progress = try container.decodeIfPresent([String: Double].self, forKey: .progress) ?? [:]
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
 }
 
 final class ArticleCache {
@@ -171,8 +292,8 @@ final class ArticleCache {
         return try? decoder.decode(CachedLibrary.self, from: data)
     }
 
-    func save(account: String, archived: Bool, articles: [ArticleSummary], details: [String: Article]) {
-        let payload = CachedLibrary(articles: articles, details: details, updatedAt: Date())
+    func save(account: String, archived: Bool, articles: [ArticleSummary], details: [String: Article], progress: [String: Double]) {
+        let payload = CachedLibrary(articles: articles, details: details, progress: progress, updatedAt: Date())
         guard let data = try? encoder.encode(payload) else { return }
         let url = fileURL(account: account, archived: archived)
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -218,11 +339,17 @@ final class TokenStore {
             if let token = defaults.string(forKey: tokenKey) {
                 return token
             }
-            return UserDefaults.standard.string(forKey: tokenKey)
+            if let legacyToken = UserDefaults.standard.string(forKey: tokenKey) {
+                defaults.set(legacyToken, forKey: tokenKey)
+                defaults.synchronize()
+                return legacyToken
+            }
+            return nil
         }
         set {
             defaults.set(newValue, forKey: tokenKey)
             UserDefaults.standard.set(newValue, forKey: tokenKey)
+            defaults.synchronize()
         }
     }
 
@@ -231,11 +358,17 @@ final class TokenStore {
             if let email = defaults.string(forKey: emailKey) {
                 return email
             }
-            return UserDefaults.standard.string(forKey: emailKey)
+            if let legacyEmail = UserDefaults.standard.string(forKey: emailKey) {
+                defaults.set(legacyEmail, forKey: emailKey)
+                defaults.synchronize()
+                return legacyEmail
+            }
+            return nil
         }
         set {
             defaults.set(newValue, forKey: emailKey)
             UserDefaults.standard.set(newValue, forKey: emailKey)
+            defaults.synchronize()
         }
     }
 
@@ -298,7 +431,7 @@ final class ReaderAPI {
     }
 
     func articles(archived: Bool = false, search: String = "", since: Date? = nil) async throws -> [ArticleSummary] {
-        var items = [URLQueryItem(name: "archived", value: archived ? "true" : "false")]
+        var items = [URLQueryItem(name: "mode", value: archived ? "archive" : "inbox")]
         if !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             items.append(URLQueryItem(name: "search", value: search))
         }
@@ -318,6 +451,10 @@ final class ReaderAPI {
 
     func setArchived(_ archived: Bool, articleId: String) async throws -> Article {
         try await send(path: "api/articles/\(articleId)", method: "PATCH", body: ["archived": archived])
+    }
+
+    func setRead(_ read: Bool, articleId: String) async throws -> Article {
+        try await send(path: "api/articles/\(articleId)", method: "PATCH", body: PatchArticleBody(readAt: read))
     }
 
     func deleteArticle(id: String) async throws {
@@ -363,6 +500,16 @@ final class ReaderAPI {
 
 private struct EmptyResponse: Codable {}
 
+private struct PatchArticleBody: Encodable {
+    let archived: Bool?
+    let readAt: Bool?
+
+    init(archived: Bool? = nil, readAt: Bool? = nil) {
+        self.archived = archived
+        self.readAt = readAt
+    }
+}
+
 @MainActor
 final class ReaderStore: ObservableObject {
     @Published var articles: [ArticleSummary] = []
@@ -391,6 +538,7 @@ final class ReaderStore: ObservableObject {
     let tokenStore = TokenStore.shared
     private let cache = ArticleCache.shared
     private var articleDetails: [String: Article] = [:]
+    private var readingProgress: [String: Double] = [:]
     private var prefetchingArticleIds = Set<String>()
 
     var isSignedIn: Bool {
@@ -439,6 +587,7 @@ final class ReaderStore: ObservableObject {
         selectedArticle = nil
         selectedId = nil
         articleDetails = [:]
+        readingProgress = [:]
     }
 
     func setTheme(_ value: ReaderTheme) {
@@ -562,6 +711,64 @@ final class ReaderStore: ObservableObject {
         }
     }
 
+    func toggleRead(_ summary: ArticleSummary) async {
+        await setRead(summary.readAt == nil, articleId: summary.id)
+    }
+
+    func setRead(_ read: Bool, articleId: String) async {
+        do {
+            let updated = try await api.setRead(read, articleId: articleId)
+            articleDetails[articleId] = updated
+            selectedArticle = selectedId == articleId ? updated : selectedArticle
+            await loadArticles()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func archive(_ summary: ArticleSummary) async {
+        do {
+            _ = try await api.setArchived(true, articleId: summary.id)
+            articleDetails.removeValue(forKey: summary.id)
+            await loadArticles()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func delete(_ summary: ArticleSummary) async {
+        do {
+            try await api.deleteArticle(id: summary.id)
+            articles.removeAll { $0.id == summary.id }
+            articleDetails.removeValue(forKey: summary.id)
+            readingProgress.removeValue(forKey: summary.id)
+            if selectedId == summary.id {
+                selectedId = nil
+                selectedArticle = nil
+            }
+            saveCache()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func progress(for articleId: String) -> Double {
+        readingProgress[articleId] ?? 0
+    }
+
+    func articleURL(for summary: ArticleSummary) -> URL {
+        if let url = articleDetails[summary.id]?.url,
+           let parsed = URL(string: url) {
+            return parsed
+        }
+        return appBaseURL
+    }
+
+    func setProgress(_ value: Double, articleId: String) {
+        readingProgress[articleId] = max(0, min(1, value))
+        saveCache()
+    }
+
     @discardableResult
     private func loadCachedArticles() -> CachedLibrary? {
         guard let account = tokenStore.email,
@@ -569,6 +776,7 @@ final class ReaderStore: ObservableObject {
             return nil
         }
         articleDetails.merge(cached.details) { current, _ in current }
+        readingProgress.merge(cached.progress) { current, _ in current }
         if articles.isEmpty {
             articles = cached.articles
         }
@@ -583,7 +791,7 @@ final class ReaderStore: ObservableObject {
               search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return
         }
-        cache.save(account: account, archived: archived, articles: articles, details: articleDetails)
+        cache.save(account: account, archived: archived, articles: articles, details: articleDetails, progress: readingProgress)
     }
 
     private func mergeSummaries(existing: [ArticleSummary], incoming: [ArticleSummary]) -> [ArticleSummary] {
@@ -609,6 +817,7 @@ enum AuthMode {
 }
 
 enum ReaderTheme: String, CaseIterable, Identifiable {
+    case system
     case offWhite
     case darkGray
     case oled
@@ -618,13 +827,14 @@ enum ReaderTheme: String, CaseIterable, Identifiable {
     static func load() -> ReaderTheme {
         guard let raw = UserDefaults.standard.string(forKey: "reader.native.theme"),
               let theme = ReaderTheme(rawValue: raw) else {
-            return .offWhite
+            return .system
         }
         return theme
     }
 
     var label: String {
         switch self {
+        case .system: "System"
         case .offWhite: "Paper"
         case .darkGray: "Graphite"
         case .oled: "OLED"
@@ -633,7 +843,13 @@ enum ReaderTheme: String, CaseIterable, Identifiable {
 
     var background: Color {
         switch self {
-        case .offWhite: Color(red: 0.972, green: 0.964, blue: 0.94)
+        case .system:
+            #if os(iOS)
+            Color(uiColor: .systemBackground)
+            #else
+            Color(nsColor: .windowBackgroundColor)
+            #endif
+        case .offWhite: Color(red: 0.965, green: 0.965, blue: 0.955)
         case .darkGray: Color(red: 0.075, green: 0.075, blue: 0.08)
         case .oled: .black
         }
@@ -641,7 +857,13 @@ enum ReaderTheme: String, CaseIterable, Identifiable {
 
     var panel: Color {
         switch self {
-        case .offWhite: Color.white.opacity(0.72)
+        case .system:
+            #if os(iOS)
+            Color(uiColor: .secondarySystemBackground).opacity(0.86)
+            #else
+            Color(nsColor: .controlBackgroundColor).opacity(0.86)
+            #endif
+        case .offWhite: Color.white.opacity(0.74)
         case .darkGray: Color(red: 0.13, green: 0.13, blue: 0.14).opacity(0.92)
         case .oled: Color(red: 0.035, green: 0.035, blue: 0.04).opacity(0.96)
         }
@@ -649,6 +871,7 @@ enum ReaderTheme: String, CaseIterable, Identifiable {
 
     var selectedPanel: Color {
         switch self {
+        case .system: Color.primary.opacity(0.08)
         case .offWhite: Color.black.opacity(0.08)
         case .darkGray, .oled: Color.white.opacity(0.13)
         }
@@ -656,6 +879,7 @@ enum ReaderTheme: String, CaseIterable, Identifiable {
 
     var primary: Color {
         switch self {
+        case .system: Color.primary
         case .offWhite: Color(red: 0.08, green: 0.08, blue: 0.085)
         case .darkGray, .oled: Color.white.opacity(0.95)
         }
@@ -663,6 +887,7 @@ enum ReaderTheme: String, CaseIterable, Identifiable {
 
     var secondary: Color {
         switch self {
+        case .system: Color.secondary
         case .offWhite: Color.black.opacity(0.56)
         case .darkGray, .oled: Color.white.opacity(0.62)
         }
@@ -670,13 +895,15 @@ enum ReaderTheme: String, CaseIterable, Identifiable {
 
     var hairline: Color {
         switch self {
+        case .system: Color.primary.opacity(0.12)
         case .offWhite: Color.black.opacity(0.10)
         case .darkGray, .oled: Color.white.opacity(0.12)
         }
     }
 
-    var scheme: ColorScheme {
+    var scheme: ColorScheme? {
         switch self {
+        case .system: nil
         case .offWhite: .light
         case .darkGray, .oled: .dark
         }
@@ -891,6 +1118,7 @@ struct LibraryView: View {
 struct CompactLibraryView: View {
     @ObservedObject var store: ReaderStore
     @Binding var showingAdd: Bool
+    @State private var searchTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
@@ -900,7 +1128,7 @@ struct CompactLibraryView: View {
                 VStack(spacing: 0) {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(store.archived ? "Archive" : "Library")
+                            Text(store.archived ? "Archive" : "Inbox")
                                 .font(.system(.largeTitle, design: .default, weight: .bold))
                                 .foregroundStyle(store.theme.primary)
                             Text("\(store.articles.count) articles")
@@ -917,6 +1145,7 @@ struct CompactLibraryView: View {
 
                         Button {
                             store.archived.toggle()
+                            store.search = ""
                             Task { await store.loadArticles() }
                         } label: {
                             Image(systemName: store.archived ? "tray" : "archivebox")
@@ -935,10 +1164,24 @@ struct CompactLibraryView: View {
                             .font(.title3)
                             .submitLabel(.search)
                             .onSubmit { Task { await store.loadArticles() } }
+                        if !store.search.isEmpty {
+                            Button {
+                                store.search = ""
+                                Task { await store.loadArticles() }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(store.theme.secondary)
+                        }
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 14)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .background(searchMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(store.theme.hairline)
+                    }
                     .padding(.horizontal, 24)
                     .padding(.bottom, 18)
 
@@ -946,9 +1189,34 @@ struct CompactLibraryView: View {
                         LazyVStack(spacing: 10) {
                             ForEach(store.articles) { article in
                                 NavigationLink(value: article) {
-                                    ArticleRow(article: article, selected: false, theme: store.theme)
+                                    ArticleRow(article: article, selected: false, theme: store.theme, progress: store.progress(for: article.id))
                                 }
                                 .buttonStyle(.plain)
+                                .contextMenu {
+                                    articleMenu(article)
+                                }
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                    Button(role: .destructive) {
+                                        Task { await store.delete(article) }
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
+                                .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                                    Button {
+                                        Task { await store.archive(article) }
+                                    } label: {
+                                        Label("Archive", systemImage: "archivebox")
+                                    }
+                                    .tint(.blue)
+
+                                    Button {
+                                        Task { await store.toggleRead(article) }
+                                    } label: {
+                                        Label(article.readAt == nil ? "Read" : "Unread", systemImage: article.readAt == nil ? "checkmark.circle" : "circle")
+                                    }
+                                    .tint(.green)
+                                }
                             }
                         }
                         .padding(.horizontal, 18)
@@ -958,9 +1226,43 @@ struct CompactLibraryView: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(.hidden, for: .navigationBar)
+            .onChange(of: store.search) { _, _ in
+                searchTask?.cancel()
+                searchTask = Task {
+                    try? await Task.sleep(nanoseconds: 280_000_000)
+                    guard !Task.isCancelled else { return }
+                    await store.loadArticles()
+                }
+            }
             .navigationDestination(for: ArticleSummary.self) { article in
                 CompactReaderDestination(summary: article, store: store)
             }
+        }
+    }
+
+    private var searchMaterial: AnyShapeStyle {
+        store.theme.scheme == .dark ? AnyShapeStyle(.thinMaterial) : AnyShapeStyle(Color.white.opacity(0.72))
+    }
+
+    @ViewBuilder
+    private func articleMenu(_ article: ArticleSummary) -> some View {
+        Button {
+            Task { await store.toggleRead(article) }
+        } label: {
+            Label(article.readAt == nil ? "Mark as Read" : "Mark as Unread", systemImage: article.readAt == nil ? "checkmark.circle" : "circle")
+        }
+        Button {
+            Task { await store.archive(article) }
+        } label: {
+            Label("Archive", systemImage: "archivebox")
+        }
+        ShareLink(item: store.articleURL(for: article)) {
+            Label("Share", systemImage: "square.and.arrow.up")
+        }
+        Button(role: .destructive) {
+            Task { await store.delete(article) }
+        } label: {
+            Label("Delete", systemImage: "trash")
         }
     }
 }
@@ -970,13 +1272,16 @@ struct CompactReaderDestination: View {
     @ObservedObject var store: ReaderStore
     @Environment(\.dismiss) private var dismiss
     @State private var article: Article?
+    @State private var chromeVisible = true
 
     var body: some View {
         ZStack {
             store.theme.background.ignoresSafeArea()
 
             if let article {
-                ReaderDetailView(article: article, store: store) {
+                ReaderDetailView(article: article, store: store, onChromeVisibilityChange: { visible in
+                    chromeVisible = visible
+                }) {
                     Task { await store.toggleArchive() }
                 }
             } else {
@@ -999,13 +1304,23 @@ struct CompactReaderDestination: View {
             .buttonStyle(.plain)
             .padding(.leading, 18)
             .padding(.top, 10)
+            .opacity(chromeVisible ? 1 : 0)
+            .offset(y: chromeVisible ? 0 : -18)
+            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: chromeVisible)
+            .allowsHitTesting(chromeVisible)
         }
         .contentShape(Rectangle())
-        .overlay(alignment: .leading) {
-            EdgeSwipeDismissOverlay { dismiss() }
-                .frame(width: 28)
-        }
         .toolbar(.hidden, for: .navigationBar)
+        .readerSystemChromeHidden(!chromeVisible)
+        .onAppear {
+            postChromeVisibility(chromeVisible)
+        }
+        .onDisappear {
+            postChromeVisibility(true)
+        }
+        .onChange(of: chromeVisible) { _, visible in
+            postChromeVisibility(visible)
+        }
         .task(id: summary.id) {
             article = store.selectedArticle?.id == summary.id ? store.selectedArticle : Article(summary: summary)
             await store.select(summary)
@@ -1014,40 +1329,9 @@ struct CompactReaderDestination: View {
             }
         }
     }
-}
 
-struct EdgeSwipeDismissOverlay: UIViewRepresentable {
-    let onDismiss: () -> Void
-
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView(frame: .zero)
-        view.backgroundColor = .clear
-        let gesture = UIScreenEdgePanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleGesture(_:)))
-        gesture.edges = .left
-        view.addGestureRecognizer(gesture)
-        return view
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {}
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onDismiss: onDismiss)
-    }
-
-    final class Coordinator: NSObject {
-        private let onDismiss: () -> Void
-
-        init(onDismiss: @escaping () -> Void) {
-            self.onDismiss = onDismiss
-        }
-
-        @objc func handleGesture(_ gesture: UIScreenEdgePanGestureRecognizer) {
-            guard gesture.state == .ended,
-                  gesture.translation(in: gesture.view).x > 70 else {
-                return
-            }
-            onDismiss()
-        }
+    private func postChromeVisibility(_ visible: Bool) {
+        NotificationCenter.default.post(name: .readerChromeVisibilityChanged, object: visible)
     }
 }
 #endif
@@ -1103,7 +1387,7 @@ struct ArticleSidebar: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(store.articles) { article in
-                        ArticleRow(article: article, selected: store.selectedId == article.id, theme: store.theme)
+                        ArticleRow(article: article, selected: store.selectedId == article.id, theme: store.theme, progress: store.progress(for: article.id))
                             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                             .onTapGesture {
                                 Task { await store.select(article) }
@@ -1121,13 +1405,19 @@ struct ArticleRow: View {
     let article: ArticleSummary
     let selected: Bool
     let theme: ReaderTheme
+    let progress: Double
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(article.title)
-                .font(.system(.headline, design: .default, weight: .semibold))
-                .lineLimit(2)
-                .foregroundStyle(theme.primary)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Circle()
+                    .fill(article.readAt == nil ? Color.accentColor : theme.secondary.opacity(0.22))
+                    .frame(width: 8, height: 8)
+                Text(article.title)
+                    .font(.system(.headline, design: .default, weight: article.readAt == nil ? .semibold : .regular))
+                    .lineLimit(2)
+                    .foregroundStyle(theme.primary)
+            }
             if let description = article.description, !description.isEmpty {
                 Text(description)
                     .font(.system(.subheadline))
@@ -1140,6 +1430,11 @@ struct ArticleRow: View {
             }
             .font(.caption)
             .foregroundStyle(theme.secondary.opacity(0.75))
+            if progress > 0 {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .tint(Color.accentColor.opacity(0.78))
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1150,6 +1445,7 @@ struct ArticleRow: View {
 struct ReaderDetailView: View {
     let article: Article
     @ObservedObject var store: ReaderStore
+    var onChromeVisibilityChange: ((Bool) -> Void)?
     let onArchive: () -> Void
     @State private var showPreferences = true
     @State private var lastScrollY: CGFloat?
@@ -1196,9 +1492,9 @@ struct ReaderDetailView: View {
                 DragGesture(minimumDistance: 8)
                     .onChanged { value in
                         if value.translation.height < -10 {
-                            showPreferences = false
+                            setChromeVisible(false)
                         } else if value.translation.height > 10 {
-                            showPreferences = true
+                            setChromeVisible(true)
                         }
                     }
             )
@@ -1211,6 +1507,12 @@ struct ReaderDetailView: View {
                 .allowsHitTesting(showPreferences)
         }
         .background(store.theme.background)
+        .onAppear {
+            setChromeVisible(true)
+        }
+        .onDisappear {
+            setChromeVisible(true)
+        }
     }
 
     private var titleSize: CGFloat {
@@ -1252,13 +1554,23 @@ struct ReaderDetailView: View {
         }
 
         if y >= -4 {
-            showPreferences = true
+            setChromeVisible(true)
         } else if y < lastScrollY - 4 {
-            showPreferences = false
+            setChromeVisible(false)
         } else if y > lastScrollY + 4 {
-            showPreferences = true
+            setChromeVisible(true)
         }
+        store.setProgress(min(1, max(0, -y / 1400)), articleId: article.id)
         self.lastScrollY = y
+    }
+
+    private func setChromeVisible(_ visible: Bool) {
+        guard showPreferences != visible else { return }
+        showPreferences = visible
+        onChromeVisibilityChange?(visible)
+        #if os(iOS)
+        NotificationCenter.default.post(name: .readerChromeVisibilityChanged, object: visible)
+        #endif
     }
 
     private var byline: String {
@@ -1295,6 +1607,19 @@ struct ReaderCommandBar: View {
                     .accessibilityLabel("Reader settings")
             }
             .buttonStyle(LiquidGlassIconButtonStyle(theme: store.theme))
+            #if os(iOS)
+            .sheet(isPresented: $showingSettings) {
+                ReaderSettingsPanel(store: store)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
+                    .padding(.bottom, 6)
+                    .background(.clear)
+                    .presentationDetents([.medium])
+                    .presentationDragIndicator(.visible)
+                    .presentationBackground(.ultraThinMaterial)
+                    .preferredColorScheme(store.theme.scheme)
+            }
+            #else
             .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
                 ReaderSettingsPanel(store: store)
                     .frame(width: 340)
@@ -1302,6 +1627,7 @@ struct ReaderCommandBar: View {
                     .background(store.theme.background)
                     .preferredColorScheme(store.theme.scheme)
             }
+            #endif
         }
         .padding(8)
         .background {

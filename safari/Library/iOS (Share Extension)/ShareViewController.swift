@@ -35,7 +35,14 @@ final class ShareViewController: UIViewController {
                 return
             }
 
-            guard let token = sharedToken() else {
+            guard let sharedDefaults = UserDefaults(suiteName: appGroupIdentifier) else {
+                storePending(url)
+                showFailure("App Group access is not available.")
+                complete(after: 1.8)
+                return
+            }
+
+            guard let token = sharedToken(from: sharedDefaults) else {
                 storePending(url)
                 showFailure("Open Library and sign in.")
                 complete(after: 1.6)
@@ -118,8 +125,8 @@ final class ShareViewController: UIViewController {
         return detector?.firstMatch(in: text, range: range)?.url
     }
 
-    private func sharedToken() -> String? {
-        UserDefaults(suiteName: appGroupIdentifier)?.string(forKey: tokenKey)
+    private func sharedToken(from defaults: UserDefaults) -> String? {
+        defaults.string(forKey: tokenKey)
     }
 
     private func storePending(_ url: URL) {

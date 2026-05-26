@@ -8,6 +8,7 @@ export async function GET(req: NextRequest) {
     const user = await requireUser();
     const { searchParams } = req.nextUrl;
     const archived = searchParams.get("archived");
+    const mode = searchParams.get("mode");
     const labelId = searchParams.get("labelId");
     const search = searchParams.get("search");
     const since = searchParams.get("since");
@@ -20,10 +21,19 @@ export async function GET(req: NextRequest) {
       sort === "published" ? { publishedAt: "desc" as const } :
       { createdAt: "desc" as const };
 
+    const visibilityWhere =
+      mode === "inbox"
+        ? { archived: false, readAt: null }
+        : mode === "archive"
+          ? { OR: [{ archived: true }, { readAt: { not: null } }] }
+          : archived !== null
+            ? { archived: archived === "true" }
+            : {};
+
     const articles = await prisma.article.findMany({
       where: {
         userId: user.id,
-        ...(archived !== null && { archived: archived === "true" }),
+        ...visibilityWhere,
         ...(sinceDate && !Number.isNaN(sinceDate.getTime()) && { updatedAt: { gt: sinceDate } }),
         ...(labelId && { labels: { some: { id: labelId } } }),
         ...(search && {
