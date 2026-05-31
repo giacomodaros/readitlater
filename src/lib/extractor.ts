@@ -95,6 +95,100 @@ function jsonImage(value: unknown) {
   return null;
 }
 
+function siteNameFromUrl(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function stripMarkdown(value: string) {
+  return value
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^[\s>*#-]+/gm, "")
+    .replace(/[*_`~]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function markdownToHtml(markdown: string) {
+  const blocks = markdown
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .filter((block) => !/^(\[|\*\*?Image\b|!\[)/i.test(block));
+
+  return blocks
+    .map((block) => {
+      const heading = block.match(/^#{1,3}\s+(.+)$/);
+      if (heading) return `<h2>${escapeHtml(stripMarkdown(heading[1]))}</h2>`;
+      return `<p>${escapeHtml(stripMarkdown(block))}</p>`;
+    })
+    .filter((block) => !/^<p><\/p>$/.test(block))
+    .join("\n");
+}
+
+function parseReaderResponse(url: string, text: string) {
+  const source = firstValue(text.match(/^URL Source:\s*(.+)$/m)?.[1], url) ?? url;
+  const markdownMarker = "Markdown Content:";
+  const markerIndex = text.indexOf(markdownMarker);
+  const markdown = markerIndex >= 0 ? text.slice(markerIndex + markdownMarker.length).trim() : text.trim();
+  const content = markdownToHtml(markdown);
+
+  if (!content.trim()) {
+    throw new Error("Could not parse article content");
+  }
+
+  const title = firstValue(
+    text.match(/^Title:\s*(.+)$/m)?.[1],
+    markdown.match(/^#\s+(.+)$/m)?.[1],
+    siteNameFromUrl(source)
+  ) ?? "Untitled";
+
+  const description = stripMarkdown(markdown.split(/\n{2,}/).find((block) => stripMarkdown(block).length > 80) ?? "");
+
+  return {
+    url: source,
+    title,
+    author: null,
+    description: description || null,
+    content,
+    image: null,
+    favicon: faviconUrl(source),
+    siteName: siteNameFromUrl(source),
+    publishedAt: null,
+    ttr: computeReadingTime(content),
+  };
+}
+
+async function extractViaReaderProxy(url: string) {
+  const readerUrl = `https://r.jina.ai/${url}`;
+  const res = await fetch(readerUrl, {
+    headers: {
+      Accept: "text/plain;charset=utf-8",
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    },
+    redirect: "follow",
+  });
+
+  if (!res.ok) {
+    throw new Error(`Failed to fetch article (${res.status})`);
+  }
+
+  return parseReaderResponse(url, await res.text());
+}
+
 /** Parse pre-fetched HTML from the browser or server. */
 export async function extractFromHtml(url: string, html: string) {
   const { parseHTML } = await import("linkedom");
@@ -141,7 +235,7 @@ export async function extractFromHtml(url: string, html: string) {
     siteName: firstValue(
       article.siteName,
       meta(document, 'meta[property="og:site_name"]', 'meta[name="application-name"]'),
-      new URL(url).hostname.replace(/^www\./, "")
+      siteNameFromUrl(url)
     ),
     publishedAt: normalizeDate(
       firstValue(
@@ -156,15 +250,32 @@ export async function extractFromHtml(url: string, html: string) {
 
 /** Fetch and extract via server-side HTTP (works for open, non-rate-limited sites). */
 export async function extractArticle(url: string) {
-  const res = await fetch(url, {
-    headers: {
-      "Accept": "text/html,application/xhtml+xml",
-      "User-Agent": "ArticleFetcher/1.0",
-    },
-    redirect: "follow",
-  });
+  const headers = {
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+  };
 
-  if (!res.ok) throw new Error(`Failed to fetch article (${res.status})`);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers,
+      redirect: "follow",
+    });
+  } catch {
+    return extractViaReaderProxy(url);
+  }
+
+  if (!res.ok) {
+    if ([401, 403, 406, 418, 429, 451, 503].includes(res.status)) {
+      return extractViaReaderProxy(url);
+    }
+    throw new Error(`Failed to fetch article (${res.status})`);
+  }
 
   const contentType = res.headers.get("content-type") ?? "";
   if (!contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {

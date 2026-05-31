@@ -67,14 +67,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "URL is required" }, { status: 400 });
     }
 
-    const existing = await prisma.article.findUnique({ where: { userId_url: { userId: user.id, url } } });
+    const existing = await prisma.article.findUnique({
+      where: { userId_url: { userId: user.id, url } },
+      include: { labels: true },
+    });
     if (existing) {
       return NextResponse.json(existing);
     }
 
-    const data = html && typeof html === "string"
-      ? await extractFromHtml(url, html)
-      : await extractArticle(url);
+    const metadataOnly = body.metadataOnly === true || body.source === "matter";
+    const data = metadataOnly
+      ? metadataArticleData(url, body)
+      : html && typeof html === "string"
+        ? await extractFromHtml(url, html)
+        : await extractArticle(url);
 
     const article = await prisma.article.create({
       data: { ...data, userId: user.id },
@@ -86,4 +92,39 @@ export async function POST(req: NextRequest) {
     const message = e instanceof Error ? e.message : "Failed";
     return NextResponse.json({ error: message }, { status: 422 });
   }
+}
+
+function metadataArticleData(url: string, body: Record<string, unknown>) {
+  const parsed = new URL(url);
+  const title = stringValue(body.title) || parsed.hostname.replace(/^www\./, "");
+  const author = stringValue(body.author);
+  const siteName = stringValue(body.siteName) || stringValue(body.publisher) || parsed.hostname.replace(/^www\./, "");
+  const description = stringValue(body.description);
+  const content = stringValue(body.content) || `<p>${escapeHtml(description || "Imported from Matter.")}</p>`;
+  const words = Number(body.wordCount);
+
+  return {
+    url,
+    title,
+    author,
+    description: description || null,
+    content,
+    image: null,
+    favicon: `${parsed.origin}/favicon.ico`,
+    siteName,
+    publishedAt: null,
+    ttr: Number.isFinite(words) && words > 0 ? Math.max(1, Math.round(words / 238)) : 1,
+  };
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }

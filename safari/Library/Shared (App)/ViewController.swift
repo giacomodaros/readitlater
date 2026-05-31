@@ -8,6 +8,7 @@
 import SwiftUI
 import Combine
 import WebKit
+import UniformTypeIdentifiers
 
 #if os(iOS)
 import UIKit
@@ -95,6 +96,19 @@ let appGroupIdentifier = "group.com.giacomodaros.library"
 
 extension View {
     @ViewBuilder
+    func readerNativeSearchable(
+        active: Bool,
+        text: Binding<String>,
+        isPresented: Binding<Bool>
+    ) -> some View {
+        if active {
+            self.searchable(text: text, isPresented: isPresented, placement: .automatic, prompt: "Search")
+        } else {
+            self
+        }
+    }
+
+    @ViewBuilder
     func readerSystemChromeHidden(_ hidden: Bool) -> some View {
         #if os(iOS)
         self
@@ -147,6 +161,37 @@ extension View {
             }
         }
     }
+
+    @ViewBuilder
+    func readerStableGlassCircle(theme: ReaderTheme) -> some View {
+        let shape = Circle()
+        if #available(iOS 26.0, macOS 26.0, *) {
+            self
+                .buttonStyle(.plain)
+                .readerGlassPressAnimation()
+                .background {
+                    shape
+                        .fill(theme.glassBase)
+                        .overlay {
+                            shape.strokeBorder(theme.hairline.opacity(theme.isDark ? 0.7 : 0.45))
+                        }
+                }
+                .glassEffect(.regular.interactive(), in: shape)
+                .shadow(color: .black.opacity(theme == .offWhite ? 0.08 : 0.30), radius: 18, y: 9)
+        } else {
+            self
+                .buttonStyle(.plain)
+                .readerGlassPressAnimation()
+                .background {
+                    shape
+                        .fill(theme.glassBase)
+                        .overlay {
+                            shape.strokeBorder(theme.hairline.opacity(theme.isDark ? 0.7 : 0.45))
+                        }
+                        .shadow(color: .black.opacity(theme == .offWhite ? 0.10 : 0.34), radius: 18, y: 9)
+                }
+        }
+    }
 }
 
 struct ReaderGlassPressModifier: ViewModifier {
@@ -189,9 +234,38 @@ extension View {
                         .fill(theme.glassBase)
                 }
                 .glassEffect(.regular.interactive(), in: Capsule(style: .continuous))
-                .shadow(color: .black.opacity(theme == .offWhite ? 0.08 : 0.28), radius: 18, y: 8)
         } else {
-            self.readerGlassBarBackground(theme: theme)
+            self.background {
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        Capsule(style: .continuous)
+                            .strokeBorder(theme.hairline)
+                    }
+            }
+        }
+    }
+
+    @ViewBuilder
+    func readerGlassPanelBackground(theme: ReaderTheme) -> some View {
+        if #available(iOS 26.0, macOS 26.0, *) {
+            self
+                .background {
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .fill(theme.glassBase)
+                }
+                .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+                .shadow(color: .black.opacity(theme == .offWhite ? 0.10 : 0.34), radius: 22, y: 12)
+        } else {
+            self.background {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 26, style: .continuous)
+                            .strokeBorder(theme.hairline)
+                    }
+                    .shadow(color: .black.opacity(theme == .offWhite ? 0.14 : 0.45), radius: 24, y: 12)
+            }
         }
     }
 
@@ -613,8 +687,30 @@ final class ReaderAPI {
         try await send(path: "api/articles/\(id)")
     }
 
-    func save(url: String) async throws -> Article {
-        try await send(path: "api/articles", method: "POST", body: ["url": url])
+    func save(
+        url: String,
+        html: String? = nil,
+        source: String? = nil,
+        metadataOnly: Bool? = nil,
+        title: String? = nil,
+        author: String? = nil,
+        siteName: String? = nil,
+        description: String? = nil,
+        content: String? = nil,
+        wordCount: Int? = nil
+    ) async throws -> Article {
+        try await send(path: "api/articles", method: "POST", body: SaveArticleBody(
+            url: url,
+            html: html,
+            source: source,
+            metadataOnly: metadataOnly,
+            title: title,
+            author: author,
+            siteName: siteName,
+            description: description,
+            content: content,
+            wordCount: wordCount
+        ))
     }
 
     func setArchived(_ archived: Bool, articleId: String) async throws -> Article {
@@ -678,6 +774,240 @@ private struct PatchArticleBody: Encodable {
     }
 }
 
+private struct SaveArticleBody: Encodable {
+    let url: String
+    let html: String?
+    let source: String?
+    let metadataOnly: Bool?
+    let title: String?
+    let author: String?
+    let siteName: String?
+    let description: String?
+    let content: String?
+    let wordCount: Int?
+}
+
+struct MatterImportResult: Equatable {
+    var totalRows = 0
+    var queued = 0
+    var archived = 0
+    var skipped = 0
+    var failed = 0
+    var lastError: String?
+
+    var imported: Int { queued + archived }
+
+    var summary: String {
+        var parts = ["Imported \(imported)"]
+        parts.append("\(queued) inbox")
+        parts.append("\(archived) archive")
+        if skipped > 0 { parts.append("\(skipped) skipped") }
+        if failed > 0 { parts.append("\(failed) failed") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+private struct MatterImportRecord {
+    let title: String
+    let author: String
+    let publisher: String
+    let wordCount: Int?
+    let url: String
+    let inQueue: Bool
+    let read: Bool
+
+    var normalizedURL: URL? {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let parsed = URL(string: trimmed) else { return nil }
+        guard parsed.scheme == "http" || parsed.scheme == "https" else { return nil }
+        return parsed
+    }
+
+    var fallbackHTML: String {
+        let titleValue = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let authorValue = author.trimmingCharacters(in: .whitespacesAndNewlines)
+        let publisherValue = publisher.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayTitle = titleValue.isEmpty ? normalizedURL?.host ?? "Imported article" : titleValue
+        let byline = authorValue.isEmpty ? "" : "<p class=\"byline\">By \(Self.escape(authorValue))</p>"
+        let publisherMeta = publisherValue.isEmpty ? "" : "<meta property=\"og:site_name\" content=\"\(Self.escape(publisherValue))\">"
+
+        return """
+        <!doctype html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <title>\(Self.escape(displayTitle))</title>
+        \(publisherMeta)
+        </head>
+        <body>
+        <article>
+        <h1>\(Self.escape(displayTitle))</h1>
+        \(byline)
+        <p>Imported from Matter.</p>
+        </article>
+        </body>
+        </html>
+        """
+    }
+
+    var fallbackContent: String {
+        let titleValue = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let authorValue = author.trimmingCharacters(in: .whitespacesAndNewlines)
+        let publisherValue = publisher.trimmingCharacters(in: .whitespacesAndNewlines)
+        let titleParagraph = titleValue.isEmpty ? "" : "<p><strong>\(Self.escape(titleValue))</strong></p>"
+        let byline = authorValue.isEmpty ? "" : "<p>By \(Self.escape(authorValue))</p>"
+        let publisherLine = publisherValue.isEmpty ? "" : "<p>\(Self.escape(publisherValue))</p>"
+        return "\(titleParagraph)\(byline)\(publisherLine)<p>Imported from Matter.</p>"
+    }
+
+    private static func escape(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+}
+
+private enum MatterCSVError: LocalizedError {
+    case unreadable
+    case missingColumns([String])
+
+    var errorDescription: String? {
+        switch self {
+        case .unreadable:
+            "The Matter CSV could not be read."
+        case .missingColumns(let columns):
+            "The Matter CSV is missing: \(columns.joined(separator: ", "))."
+        }
+    }
+}
+
+private enum MatterCSVParser {
+    static func records(from data: Data) throws -> [MatterImportRecord] {
+        guard let text = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .utf16)
+            ?? String(data: data, encoding: .isoLatin1) else {
+            throw MatterCSVError.unreadable
+        }
+
+        let rows = parseRows(text)
+        guard let header = rows.first else { return [] }
+        var columns: [String: Int] = [:]
+        for (index, value) in header.enumerated() {
+            let key = normalizedHeader(value)
+            guard !key.isEmpty, columns[key] == nil else { continue }
+            columns[key] = index
+        }
+
+        var missing: [String] = []
+        if columns["url"] == nil { missing.append("URL") }
+        if columns["in queue"] == nil { missing.append("In Queue") }
+        if !missing.isEmpty { throw MatterCSVError.missingColumns(missing) }
+
+        let urlIndex = columns["url"]!
+        let queueIndex = columns["in queue"]!
+        let readIndex = columns["read"]
+        let titleIndex = columns["title"]
+        let authorIndex = columns["author"]
+        let publisherIndex = columns["publisher"]
+        let wordCountIndex = columns["word count"]
+
+        return rows.dropFirst().compactMap { row in
+            guard !row.allSatisfy({ $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+                return nil
+            }
+            let url = value(in: row, at: urlIndex)
+            return MatterImportRecord(
+                title: titleIndex.map { value(in: row, at: $0) } ?? "",
+                author: authorIndex.map { value(in: row, at: $0) } ?? "",
+                publisher: publisherIndex.map { value(in: row, at: $0) } ?? "",
+                wordCount: wordCountIndex.flatMap { Int(value(in: row, at: $0)) },
+                url: url,
+                inQueue: parseBool(value(in: row, at: queueIndex)),
+                read: readIndex.map { parseBool(value(in: row, at: $0)) } ?? false
+            )
+        }
+    }
+
+    private static func value(in row: [String], at index: Int) -> String {
+        guard row.indices.contains(index) else { return "" }
+        return row[index].trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizedHeader(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\u{feff}", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private static func parseBool(_ value: String) -> Bool {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true", "yes", "1", "y":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func parseRows(_ text: String) -> [[String]] {
+        var rows: [[String]] = []
+        var row: [String] = []
+        var field = ""
+        var inQuotes = false
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            let character = text[index]
+            if inQuotes {
+                if character == "\"" {
+                    let next = text.index(after: index)
+                    if next < text.endIndex, text[next] == "\"" {
+                        field.append("\"")
+                        index = next
+                    } else {
+                        inQuotes = false
+                    }
+                } else {
+                    field.append(character)
+                }
+            } else {
+                switch character {
+                case "\"":
+                    inQuotes = true
+                case ",":
+                    row.append(field)
+                    field = ""
+                case "\n":
+                    row.append(field)
+                    rows.append(row)
+                    row = []
+                    field = ""
+                case "\r":
+                    let next = text.index(after: index)
+                    if next < text.endIndex, text[next] == "\n" {
+                        index = next
+                    }
+                    row.append(field)
+                    rows.append(row)
+                    row = []
+                    field = ""
+                default:
+                    field.append(character)
+                }
+            }
+            index = text.index(after: index)
+        }
+
+        if !field.isEmpty || !row.isEmpty {
+            row.append(field)
+            rows.append(row)
+        }
+        return rows
+    }
+}
+
 @MainActor
 final class ReaderStore: ObservableObject {
     @Published var articles: [ArticleSummary] = []
@@ -720,6 +1050,7 @@ final class ReaderStore: ObservableObject {
     private var prefetchingArticleIds = Set<String>()
     private var cacheSaveWorkItem: DispatchWorkItem?
     private var markingReadArticleIds = Set<String>()
+    private var transientProgress: [String: Double] = [:]
     private var lastInboxFetch: Date?
     private var lastArchiveFetch: Date?
     private var backgroundFetchTask: Task<Void, Never>?
@@ -833,6 +1164,7 @@ final class ReaderStore: ObservableObject {
         articleDetails = [:]
         readingProgress = [:]
         persistedProgress = [:]
+        transientProgress = [:]
         markingReadArticleIds.removeAll()
         cacheSaveWorkItem?.cancel()
     }
@@ -873,10 +1205,49 @@ final class ReaderStore: ObservableObject {
         }
     }
 
+    func applyLocalSearch() {
+        let trimmedSearch = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedSearch.isEmpty {
+            withAnimation(.none) {
+                articles = archived ? archiveArticles : inboxArticles
+            }
+            return
+        }
+
+        let terms = trimmedSearch
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .split(separator: " ")
+            .map(String.init)
+
+        let candidates = mergeSummaries(existing: inboxArticles, incoming: archiveArticles)
+        let results = candidates.filter { summary in
+            let detail = articleDetails[summary.id]
+            let haystack = [
+                summary.title,
+                summary.author ?? "",
+                summary.description ?? "",
+                summary.siteName ?? "",
+                detail?.url ?? "",
+                detail?.content ?? "",
+            ]
+            .joined(separator: " ")
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+
+            return terms.allSatisfy { haystack.contains($0) }
+        }
+
+        withAnimation(.none) {
+            articles = results
+        }
+    }
+
     func loadArticles() async {
+        var generation = loadGeneration
         do {
             loadGeneration &+= 1
-            let generation = loadGeneration
+            generation = loadGeneration
             let queryArchived = archived
             let trimmedSearch = search.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmedSearch.isEmpty {
@@ -884,7 +1255,9 @@ final class ReaderStore: ObservableObject {
                     articles = queryArchived ? archiveArticles : inboxArticles
                 }
             } else {
-                loadCachedArticles()
+                applyLocalSearch()
+                loading = false
+                return
             }
             loading = true
             errorMessage = nil
@@ -935,6 +1308,12 @@ final class ReaderStore: ObservableObject {
             }
             prefetchMissingArticles()
         } catch {
+            if isCancellation(error) {
+                if generation == loadGeneration {
+                    loading = false
+                }
+                return
+            }
             loading = false
             errorMessage = error.localizedDescription
         }
@@ -1100,6 +1479,7 @@ final class ReaderStore: ObservableObject {
         articleDetails.removeValue(forKey: summary.id)
         readingProgress.removeValue(forKey: summary.id)
         persistedProgress.removeValue(forKey: summary.id)
+        transientProgress.removeValue(forKey: summary.id)
         if selectedId == summary.id {
             selectedId = nil
             selectedArticle = nil
@@ -1128,7 +1508,7 @@ final class ReaderStore: ObservableObject {
     }
 
     func progress(for articleId: String) -> Double {
-        readingProgress[articleId] ?? 0
+        transientProgress[articleId] ?? readingProgress[articleId] ?? 0
     }
 
     func progressPercent(for articleId: String) -> Int {
@@ -1300,6 +1680,82 @@ final class ReaderStore: ObservableObject {
         }
     }
 
+    func importMatterCSV(from url: URL) async -> MatterImportResult? {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer {
+            if accessed {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            return await importMatterCSV(data: try Data(contentsOf: url))
+        } catch {
+            loading = false
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    func importMatterCSV(data: Data) async -> MatterImportResult? {
+        do {
+            errorMessage = nil
+            loading = true
+            defer { loading = false }
+
+            let records = try MatterCSVParser.records(from: data)
+            var result = MatterImportResult(totalRows: records.count)
+
+            for record in records {
+                guard let normalizedURL = record.normalizedURL else {
+                    result.skipped += 1
+                    continue
+                }
+
+                do {
+                    var imported = try await api.save(
+                        url: normalizedURL.absoluteString,
+                        html: record.fallbackHTML,
+                        source: "matter",
+                        metadataOnly: true,
+                        title: record.title,
+                        author: record.author,
+                        siteName: record.publisher,
+                        description: nil,
+                        content: record.fallbackContent,
+                        wordCount: record.wordCount
+                    )
+                    let shouldArchive = !record.inQueue
+                    if imported.archived != shouldArchive {
+                        imported = try await api.setArchived(shouldArchive, articleId: imported.id)
+                    }
+                    if record.read, imported.readAt == nil {
+                        imported = try await api.setRead(true, articleId: imported.id)
+                    }
+                    articleDetails[imported.id] = imported
+                    if shouldArchive {
+                        result.archived += 1
+                    } else {
+                        result.queued += 1
+                    }
+                } catch {
+                    result.failed += 1
+                    result.lastError = error.localizedDescription
+                }
+            }
+
+            await refreshAll()
+            if result.failed > 0, let lastError = result.lastError {
+                errorMessage = "Matter import finished with \(result.failed) failure\(result.failed == 1 ? "" : "s"). Last error: \(lastError)"
+            }
+            return result
+        } catch {
+            loading = false
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
     private func csvEscape(_ value: String) -> String {
         let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
         return "\"\(escaped)\""
@@ -1405,12 +1861,19 @@ final class ReaderStore: ObservableObject {
         return appBaseURL
     }
 
-    func setProgress(_ value: Double, articleId: String) {
+    func setProgress(_ value: Double, articleId: String, forcePersist: Bool = false) {
         let progress = max(0, min(1, value))
-        let previous = readingProgress[articleId] ?? 0
-        guard abs(previous - progress) >= 0.05 || progress >= 0.995 || progress <= 0.002 else { return }
-        readingProgress[articleId] = progress
-        if abs((persistedProgress[articleId] ?? 0) - progress) >= 0.20 || progress >= 0.995 {
+        let previous = self.progress(for: articleId)
+        let crossedTop = progress <= 0.002 && previous > 0.002
+        let crossedEnd = progress >= 0.995 && previous < 0.995
+        guard forcePersist || abs(previous - progress) >= 0.03 || crossedTop || crossedEnd else { return }
+        if forcePersist || crossedTop || crossedEnd {
+            transientProgress.removeValue(forKey: articleId)
+            readingProgress[articleId] = progress
+        } else {
+            transientProgress[articleId] = progress
+        }
+        if forcePersist || crossedTop || crossedEnd {
             persistedProgress[articleId] = progress
             saveCache()
         }
@@ -1467,6 +1930,17 @@ final class ReaderStore: ObservableObject {
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.18, execute: workItem)
     }
 
+    private func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            return true
+        }
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
+
     private func moveSummaryBetweenSideCaches(_ summary: ArticleSummary) {
         inboxArticles.removeAll { $0.id == summary.id }
         archiveArticles.removeAll { $0.id == summary.id }
@@ -1508,6 +1982,8 @@ enum ReaderTheme: String, CaseIterable, Identifiable {
     case oled
 
     var id: String { rawValue }
+
+    static let displayOrder: [ReaderTheme] = [.offWhite, .darkGray, .oled, .system]
 
     static func load() -> ReaderTheme {
         guard let raw = UserDefaults.standard.string(forKey: "reader.native.theme"),
@@ -1551,6 +2027,23 @@ enum ReaderTheme: String, CaseIterable, Identifiable {
         case .offWhite: Color.white.opacity(0.74)
         case .darkGray: Color(red: 0.13, green: 0.13, blue: 0.14).opacity(0.92)
         case .oled: Color(red: 0.035, green: 0.035, blue: 0.04).opacity(0.96)
+        }
+    }
+
+    var settingsPanel: Color {
+        switch self {
+        case .system:
+            #if os(iOS)
+            Color(uiColor: .secondarySystemGroupedBackground)
+            #else
+            Color(nsColor: .controlBackgroundColor).opacity(0.94)
+            #endif
+        case .offWhite:
+            Color.white.opacity(0.84)
+        case .darkGray:
+            Color(red: 0.16, green: 0.16, blue: 0.17).opacity(0.98)
+        case .oled:
+            Color(red: 0.105, green: 0.105, blue: 0.115).opacity(0.98)
         }
     }
 
@@ -1797,11 +2290,7 @@ struct LibraryView: View {
     var body: some View {
         Group {
             #if os(iOS)
-            if horizontalSizeClass == .compact {
-                CompactLibraryView(store: store, showingAdd: $showingAdd)
-            } else {
-                PadLibraryView(store: store, showingAdd: $showingAdd)
-            }
+            CompactLibraryView(store: store, showingAdd: $showingAdd)
             #else
             splitLayout
             #endif
@@ -1879,6 +2368,7 @@ private enum CompactLibraryPane: Hashable {
     case inbox
     case archive
     case settings
+    case search
 }
 
 struct CompactLibraryView: View {
@@ -1897,57 +2387,234 @@ struct CompactLibraryView: View {
     @State private var isExporting = false
     @State private var searchTask: Task<Void, Never>?
     @State private var activeSelectionCommand: SelectionCommand?
-    @FocusState private var searchFocused: Bool
+    @State private var navigationPath: [ArticleSummary] = []
+    @State private var lastArticlePane: CompactLibraryPane = .inbox
+    @State private var searchPresented = false
     @Namespace private var selectionLoupeNamespace
-
-    private var listSwipeArchiveEdge: HorizontalEdge { .leading }
-    private var listSwipeDeleteEdge: HorizontalEdge { .trailing }
 
     private var isSearching: Bool {
         !store.search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var isSearchActive: Bool {
+        pane == .search || searchPresented || isSearching
+    }
+
+    private var searchAvailable: Bool {
+        !store.selectionMode && pane != .settings
+    }
+
+    private var searchTabHidden: Bool {
+        pane == .settings || store.selectionMode
+    }
+
+    private var resolvedColorScheme: ColorScheme {
+        store.theme.isDark ? .dark : .light
+    }
+
     var body: some View {
-        NavigationStack {
-            ZStack(alignment: .bottom) {
-                store.theme.background.ignoresSafeArea()
+        ZStack(alignment: .bottom) {
+            store.theme.background.ignoresSafeArea()
 
-                paneContent(pane)
-                    .background(store.theme.background.ignoresSafeArea())
+            nativeTabShell
+                .background(store.theme.background.ignoresSafeArea())
 
-                if !store.selectionMode {
-                    libraryToolbar
-                        .padding(.bottom, 12)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-
-                if store.selectionMode && pane != .settings {
-                    selectionToolbar
-                        .padding(.bottom, 12)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: store.selectionMode)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar(.hidden, for: .navigationBar)
-            .onChange(of: store.search) { _, _ in
-                searchTask?.cancel()
-                searchTask = Task {
-                    guard !Task.isCancelled else { return }
-                    await store.loadArticles()
-                }
-            }
-            .navigationDestination(for: ArticleSummary.self) { article in
-                CompactReaderDestination(summary: article, store: store)
-            }
-            .sheet(item: Binding(get: {
-                exportShareURL.map { ShareableURL(url: $0) }
-            }, set: { newValue in
-                exportShareURL = newValue?.url
-            })) { wrapper in
-                ActivityShareSheet(activityItems: [wrapper.url])
+            if store.selectionMode && pane != .settings {
+                bottomBarBackdrop
+                selectionToolbar
+                    .padding(.bottom, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: store.selectionMode)
+        .environment(\.colorScheme, resolvedColorScheme)
+        .preferredColorScheme(resolvedColorScheme)
+        .onChange(of: pane) { _, newPane in
+            guard newPane == .search else { return }
+            activateSearchField()
+        }
+        .onChange(of: searchPresented) { _, presented in
+            guard !presented, pane == .search, !isSearching else { return }
+            returnFromSearch()
+        }
+        .onChange(of: store.search) { _, _ in
+            searchTask?.cancel()
+            store.applyLocalSearch()
+        }
+        .sheet(item: Binding(get: {
+            exportShareURL.map { ShareableURL(url: $0) }
+        }, set: { newValue in
+            exportShareURL = newValue?.url
+        })) { wrapper in
+            ActivityShareSheet(activityItems: [wrapper.url])
+        }
+    }
+
+    @ViewBuilder
+    private func navigationPane(_ contentPane: CompactLibraryPane) -> some View {
+        NavigationStack(path: $navigationPath) {
+            paneContent(contentPane)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar(.hidden, for: .navigationBar)
+                .navigationDestination(for: ArticleSummary.self) { article in
+                    CompactReaderDestination(summary: article, store: store)
+                }
+        }
+    }
+
+    private func activateSearchField() {
+        Task { @MainActor in
+            guard pane == .search, !store.selectionMode else { return }
+            await Task.yield()
+            guard pane == .search else { return }
+            searchPresented = true
+        }
+    }
+
+    private func dismissSearchField() {
+        Task { @MainActor in
+            await Task.yield()
+            guard pane != .search else { return }
+            searchPresented = false
+        }
+    }
+
+    private func clearSearchIfNeeded(leavingSearch oldPane: CompactLibraryPane, entering newPane: CompactLibraryPane) {
+        guard newPane == .settings || oldPane == .search else { return }
+        store.search = ""
+    }
+
+    private func refreshForSelectedLibraryPane(_ selectedPane: CompactLibraryPane) {
+        switch selectedPane {
+        case .inbox:
+            lastArticlePane = .inbox
+            store.setArchiveMode(false)
+            Task { await store.refreshAll() }
+        case .archive:
+            lastArticlePane = .archive
+            store.setArchiveMode(true)
+            Task { await store.refreshAll() }
+        case .settings:
+            store.selectionMode = false
+            store.selectedIds.removeAll()
+        case .search:
+            break
+        }
+    }
+
+    private func returnFromSearch() {
+        navigationPath.removeAll()
+        searchPresented = false
+        store.search = ""
+        switch lastArticlePane {
+        case .inbox:
+            store.setArchiveMode(false)
+        case .archive:
+            store.setArchiveMode(true)
+        case .settings, .search:
+            break
+        }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+            pane = lastArticlePane
+        }
+    }
+
+    private func animatePaneSelection(_ selectedPane: CompactLibraryPane) {
+        pane = selectedPane
+    }
+
+    private func prepareForPaneSelection(_ selectedPane: CompactLibraryPane) -> CompactLibraryPane {
+        let oldPane = pane
+        navigationPath.removeAll()
+        if selectedPane == .search, pane == .inbox || pane == .archive {
+            lastArticlePane = pane
+        }
+        return oldPane
+    }
+
+    private func finishPaneSelection(from oldPane: CompactLibraryPane, to selectedPane: CompactLibraryPane) {
+        if selectedPane == .search {
+            activateSearchField()
+            return
+        }
+
+        dismissSearchField()
+        clearSearchIfNeeded(leavingSearch: oldPane, entering: selectedPane)
+        refreshForSelectedLibraryPane(selectedPane)
+    }
+
+    private func updatePaneSelection(_ selectedPane: CompactLibraryPane) {
+        guard !(selectedPane == .search && searchTabHidden) else {
+            return
+        }
+
+        if pane == selectedPane {
+            if selectedPane == .search {
+                activateSearchField()
+            }
+            return
+        }
+
+        let oldPane = prepareForPaneSelection(selectedPane)
+        animatePaneSelection(selectedPane)
+        finishPaneSelection(from: oldPane, to: selectedPane)
+    }
+
+    @ViewBuilder
+    private var nativeTabShell: some View {
+        if #available(iOS 18.0, *) {
+            let shell = TabView(selection: Binding(get: { pane }, set: { updatePaneSelection($0) })) {
+                Tab("Inbox", systemImage: "tray", value: CompactLibraryPane.inbox) {
+                    navigationPane(.inbox)
+                }
+                Tab("Archive", systemImage: "archivebox", value: CompactLibraryPane.archive) {
+                    navigationPane(.archive)
+                }
+                Tab("Settings", systemImage: "gearshape", value: CompactLibraryPane.settings) {
+                    navigationPane(.settings)
+                }
+                Tab(value: CompactLibraryPane.search, role: .search) {
+                    searchPane
+                } label: {
+                    Label("Search", systemImage: "magnifyingglass")
+                        .opacity(searchTabHidden ? 0 : 1)
+                }
+            }
+            .toolbar(store.selectionMode ? .hidden : .visible, for: .tabBar)
+            .readerNativeSearchable(active: searchAvailable, text: $store.search, isPresented: $searchPresented)
+            if #available(iOS 26.0, *) {
+                shell.tabViewSearchActivation(.searchTabSelection)
+            } else {
+                shell
+            }
+        } else {
+            TabView(selection: Binding(get: { pane }, set: { updatePaneSelection($0) })) {
+                navigationPane(.inbox)
+                    .tabItem { Label("Inbox", systemImage: "tray") }
+                    .tag(CompactLibraryPane.inbox)
+                navigationPane(.archive)
+                    .tabItem { Label("Archive", systemImage: "archivebox") }
+                    .tag(CompactLibraryPane.archive)
+                navigationPane(.settings)
+                    .tabItem { Label("Settings", systemImage: "gearshape") }
+                    .tag(CompactLibraryPane.settings)
+                searchPane
+                    .tabItem {
+                        Label("Search", systemImage: "magnifyingglass")
+                            .opacity(searchTabHidden ? 0 : 1)
+                    }
+                    .tag(CompactLibraryPane.search)
+            }
+            .toolbar(store.selectionMode ? .hidden : .visible, for: .tabBar)
+            .readerNativeSearchable(active: searchAvailable, text: $store.search, isPresented: $searchPresented)
+        }
+    }
+
+    private var searchPane: some View {
+        navigationPane(.search)
+            .onAppear {
+                activateSearchField()
+            }
     }
 
     @ViewBuilder
@@ -1957,7 +2624,6 @@ struct CompactLibraryView: View {
             if contentPane == .settings {
                 LibrarySettingsPane(store: store, exportShareURL: $exportShareURL)
             } else {
-                articleSearchBar()
                 articleList
             }
         }
@@ -1970,69 +2636,29 @@ struct CompactLibraryView: View {
     }
 
     private func selectPane(_ newPane: CompactLibraryPane) {
-        guard pane != newPane else { return }
-        pane = newPane
-        switch newPane {
-        case .inbox:
-            store.setArchiveMode(false)
-            Task { await store.refreshAll() }
-        case .archive:
-            store.setArchiveMode(true)
-            Task { await store.refreshAll() }
-        case .settings:
-            store.selectionMode = false
-            store.selectedIds.removeAll()
-        }
+        updatePaneSelection(newPane)
     }
 
     @ViewBuilder
-    private var libraryToolbar: some View {
-        Picker("Library", selection: Binding(get: { pane }, set: { selectPane($0) })) {
-            Label("Inbox", systemImage: "tray").tag(CompactLibraryPane.inbox)
-            Label("Archive", systemImage: "archivebox").tag(CompactLibraryPane.archive)
-            Label("Settings", systemImage: "gearshape").tag(CompactLibraryPane.settings)
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .controlSize(.large)
-        .tint(store.theme.primary)
-        .preferredColorScheme(store.themePreference.scheme)
-        .padding(.horizontal, 46)
-    }
-
-    @ViewBuilder
-    private func articleSearchBar() -> some View {
-        HStack(spacing: 8) {
-            NativeSearchField(text: $store.search, theme: store.theme, isFirstResponder: $searchFocused)
-                .frame(height: 46)
-                .frame(maxWidth: 328)
-                .preferredColorScheme(store.themePreference.scheme)
-                .background(store.theme.glassBase, in: Capsule(style: .continuous))
-                .nativeGlassCapsule(theme: store.theme)
-                .transaction { transaction in
-                    transaction.animation = nil
-                }
-
-            if isSearching {
-                Button {
-                    searchFocused = false
-                    store.search = ""
-                    Task { await store.loadArticles() }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .bold))
-                        .frame(width: 34, height: 34)
-                        .contentShape(Circle())
-                        .accessibilityLabel("Clear search")
-                }
-                .foregroundStyle(store.theme.primary)
-                .readerGlassIconButton(theme: store.theme)
-                .transition(.scale.combined(with: .opacity))
+    private var bottomBarBackdrop: some View {
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: store.theme.background.opacity(0.82), location: 0.38),
+                        .init(color: store.theme.background, location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 146 + proxy.safeAreaInsets.bottom)
+                .padding(.bottom, -proxy.safeAreaInsets.bottom)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 12)
-        .animation(.spring(response: 0.24, dampingFraction: 0.86), value: isSearching)
+            .ignoresSafeArea(edges: .bottom)
+            .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -2070,7 +2696,8 @@ struct CompactLibraryView: View {
                         .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
-                .preferredColorScheme(store.themePreference.scheme)
+                .environment(\.colorScheme, resolvedColorScheme)
+                .preferredColorScheme(resolvedColorScheme)
             } else {
                 Color.clear
                     .frame(width: 44, height: 44)
@@ -2078,7 +2705,7 @@ struct CompactLibraryView: View {
         }
         .padding(.horizontal, 22)
         .padding(.top, 22)
-        .padding(.bottom, 12)
+        .padding(.bottom, 2)
     }
 
     private func headerTitle(for contentPane: CompactLibraryPane) -> String {
@@ -2088,14 +2715,17 @@ struct CompactLibraryView: View {
         if contentPane == .settings {
             return "Settings"
         }
-        return isSearching ? "Search" : (store.archived ? "Archive" : "Inbox")
+        if contentPane == .search || isSearching {
+            return "Search"
+        }
+        return store.archived ? "Archive" : "Inbox"
     }
 
     private func headerSubtitle(for contentPane: CompactLibraryPane) -> String {
         if contentPane == .settings {
             return "Reading and exports"
         }
-        if isSearching {
+        if contentPane == .search || isSearching {
             return "\(store.articles.count) result\(store.articles.count == 1 ? "" : "s")"
         }
         return "\(store.articles.count) article\(store.articles.count == 1 ? "" : "s")"
@@ -2111,7 +2741,11 @@ struct CompactLibraryView: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(Color.clear)
-        .environment(\.defaultMinListRowHeight, 126)
+        .environment(\.defaultMinListRowHeight, 70)
+        .listRowSpacing(6)
+        .contentMargins(.top, 24, for: .scrollContent)
+        .contentMargins(.horizontal, 0, for: .scrollContent)
+        .scrollDismissesKeyboard(.interactively)
     }
 
     @ViewBuilder
@@ -2136,26 +2770,32 @@ struct CompactLibraryView: View {
                 row
                     .contentShape(Rectangle())
                     .onTapGesture {
+                        searchPresented = false
                         onArticleTap(article)
                     }
             } else {
-                NavigationLink(value: article) {
-                    row
-                }
-                .buttonStyle(.plain)
+                row
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        searchPresented = false
+                        navigationPath.append(article)
+                    }
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction {
+                        searchPresented = false
+                        navigationPath.append(article)
+                    }
             }
         }
-        .listRowInsets(EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14))
+        .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
         .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
-        .transaction { transaction in
-            transaction.animation = nil
-        }
+        .listRowBackground(store.theme.background)
         .contextMenu {
             articleMenu(article)
         }
-        .preferredColorScheme(store.themePreference.scheme)
-        .swipeActions(edge: listSwipeArchiveEdge, allowsFullSwipe: true) {
+        .environment(\.colorScheme, resolvedColorScheme)
+        .preferredColorScheme(resolvedColorScheme)
+        .swipeActions(edge: .leading, allowsFullSwipe: true) {
             Button {
                 Task {
                     if article.archived {
@@ -2175,7 +2815,7 @@ struct CompactLibraryView: View {
             }
             .tint(.green)
         }
-        .swipeActions(edge: listSwipeDeleteEdge, allowsFullSwipe: true) {
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(role: .destructive) {
                 Task { await store.delete(article) }
             } label: {
@@ -2316,40 +2956,113 @@ private struct ShareableURL: Identifiable {
 }
 
 struct ActivityShareSheet: UIViewControllerRepresentable {
+    @Environment(\.dismiss) private var dismiss
     let activityItems: [Any]
 
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        let controller = UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
-        controller.modalPresentationStyle = .popover
+    func makeUIViewController(context: Context) -> ActivityPresenterViewController {
+        let controller = ActivityPresenterViewController()
+        controller.activityItems = activityItems
+        controller.onFinish = { dismiss() }
         return controller
     }
 
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+    func updateUIViewController(_ uiViewController: ActivityPresenterViewController, context: Context) {
+        uiViewController.activityItems = activityItems
+        uiViewController.onFinish = { dismiss() }
+    }
+
+    final class ActivityPresenterViewController: UIViewController {
+        var activityItems: [Any] = []
+        var onFinish: (() -> Void)?
+        private var didPresent = false
+
+        override func viewDidLoad() {
+            super.viewDidLoad()
+            view.backgroundColor = .clear
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            presentIfNeeded()
+        }
+
+        private func presentIfNeeded() {
+            guard !didPresent else { return }
+            guard view.window != nil else { return }
+            guard !activityItems.isEmpty else {
+                onFinish?()
+                return
+            }
+
+            didPresent = true
+            let controller = UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+            controller.completionWithItemsHandler = { [weak self] _, _, _, _ in
+                self?.onFinish?()
+            }
+            if let popover = controller.popoverPresentationController {
+                popover.sourceView = view
+                popover.sourceRect = CGRect(
+                    x: view.bounds.midX,
+                    y: view.bounds.midY,
+                    width: 1,
+                    height: 1
+                )
+                popover.permittedArrowDirections = []
+            }
+            present(controller, animated: true)
+        }
+    }
 }
 
 struct LibrarySettingsPane: View {
     @ObservedObject var store: ReaderStore
     @Binding var exportShareURL: URL?
+    @State private var showingMatterImporter = false
+    @State private var importingMatter = false
+    @State private var matterImportMessage: String?
+
+    private var resolvedColorScheme: ColorScheme {
+        store.theme.isDark ? .dark : .light
+    }
 
     var body: some View {
         Form {
             Section("Appearance") {
-                Picker("Theme", selection: Binding(get: { store.themePreference }, set: { store.setTheme($0) })) {
-                    ForEach(ReaderTheme.allCases) { theme in
-                        Text(theme.label).tag(theme)
+                SettingsMenuRow(title: "Theme", value: store.themePreference.label, theme: store.theme) {
+                    ForEach(ReaderTheme.displayOrder) { theme in
+                        Button {
+                            store.setTheme(theme)
+                        } label: {
+                            if theme == store.themePreference {
+                                Label(theme.label, systemImage: "checkmark")
+                            } else {
+                                Text(theme.label)
+                            }
+                        }
                     }
                 }
-                Picker("Font", selection: Binding(get: { store.readerFont }, set: { store.setReaderFont($0) })) {
+
+                SettingsMenuRow(title: "Font", value: store.readerFont.label, theme: store.theme) {
                     ForEach(ReaderFont.allCases) { font in
-                        Text(font.label).tag(font)
+                        Button {
+                            store.setReaderFont(font)
+                        } label: {
+                            if font == store.readerFont {
+                                Label(font.label, systemImage: "checkmark")
+                            } else {
+                                Text(font.label)
+                            }
+                        }
                     }
                 }
             }
-            .listRowBackground(store.theme.panel)
+            .listRowBackground(store.theme.settingsPanel)
+            .foregroundStyle(store.theme.primary)
 
             Section("Reader") {
                 HStack {
                     Text("Font size")
+                        .foregroundStyle(store.theme.primary)
                     Spacer()
                     Text("\(Int(store.textSize))")
                         .foregroundStyle(store.theme.secondary)
@@ -2358,13 +3071,14 @@ struct LibrarySettingsPane: View {
 
                 HStack {
                     Text("Line spacing")
+                        .foregroundStyle(store.theme.primary)
                     Spacer()
                     Text("\(Int(store.lineSpacing))")
                         .foregroundStyle(store.theme.secondary)
                 }
                 Slider(value: Binding(get: { store.lineSpacing }, set: { store.setLineSpacing($0) }), in: 2...18, step: 1)
             }
-            .listRowBackground(store.theme.panel)
+            .listRowBackground(store.theme.settingsPanel)
 
             Section("Highlights") {
                 Button {
@@ -2373,11 +3087,21 @@ struct LibrarySettingsPane: View {
                     }
                 } label: {
                     Label("Export highlights CSV", systemImage: "square.and.arrow.up")
+                        .foregroundStyle(store.theme.primary)
                 }
             }
-            .listRowBackground(store.theme.panel)
+            .listRowBackground(store.theme.settingsPanel)
 
             Section("Library") {
+                Button {
+                    matterImportMessage = nil
+                    showingMatterImporter = true
+                } label: {
+                    Label(importingMatter ? "Importing Matter CSV..." : "Import Matter CSV", systemImage: "square.and.arrow.down")
+                        .foregroundStyle(store.theme.primary)
+                }
+                .disabled(importingMatter)
+
                 Button {
                     Task {
                         if let url = await store.exportLibraryCSV() {
@@ -2386,9 +3110,16 @@ struct LibrarySettingsPane: View {
                     }
                 } label: {
                     Label("Export library CSV", systemImage: "tablecells")
+                        .foregroundStyle(store.theme.primary)
+                }
+
+                if let matterImportMessage {
+                    Text(matterImportMessage)
+                        .font(.footnote)
+                        .foregroundStyle(store.theme.secondary)
                 }
             }
-            .listRowBackground(store.theme.panel)
+            .listRowBackground(store.theme.settingsPanel)
 
             Section {
                 Button(role: .destructive) {
@@ -2401,12 +3132,49 @@ struct LibrarySettingsPane: View {
                     Text("Signed in as \(email)")
                 }
             }
-            .listRowBackground(store.theme.panel)
+            .listRowBackground(store.theme.settingsPanel)
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .background(store.theme.background)
         .foregroundStyle(store.theme.primary)
+        .tint(store.theme.primary)
+        .listSectionSeparatorTint(store.theme.hairline)
+        .environment(\.colorScheme, resolvedColorScheme)
+        .preferredColorScheme(resolvedColorScheme)
+        .fileImporter(
+            isPresented: $showingMatterImporter,
+            allowedContentTypes: [.commaSeparatedText, .plainText, .data]
+        ) { result in
+            switch result {
+            case .success(let url):
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer {
+                    if accessed {
+                        url.stopAccessingSecurityScopedResource()
+                    }
+                }
+                do {
+                    let data = try Data(contentsOf: url)
+                    importingMatter = true
+                    matterImportMessage = nil
+                    Task {
+                        if let result = await store.importMatterCSV(data: data) {
+                            matterImportMessage = result.summary
+                        } else {
+                            matterImportMessage = store.errorMessage ?? "Matter import failed."
+                        }
+                        importingMatter = false
+                    }
+                } catch {
+                    importingMatter = false
+                    store.errorMessage = error.localizedDescription
+                    matterImportMessage = error.localizedDescription
+                }
+            case .failure(let error):
+                matterImportMessage = error.localizedDescription
+            }
+        }
     }
 }
 
@@ -2427,6 +3195,7 @@ struct NativeSearchField: UIViewRepresentable {
         searchBar.returnKeyType = .search
         searchBar.enablesReturnKeyAutomatically = false
         searchBar.backgroundImage = UIImage()
+        searchBar.isTranslucent = true
         searchBar.setShowsCancelButton(false, animated: false)
         applyTheme(to: searchBar)
         return searchBar
@@ -2437,9 +3206,13 @@ struct NativeSearchField: UIViewRepresentable {
             searchBar.text = text
         }
         applyTheme(to: searchBar)
-        let shouldShowCancel = isFirstResponder || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if searchBar.showsCancelButton != shouldShowCancel {
-            searchBar.setShowsCancelButton(shouldShowCancel, animated: true)
+        if searchBar.showsCancelButton {
+            searchBar.setShowsCancelButton(false, animated: false)
+        }
+        if isFirstResponder, !searchBar.searchTextField.isFirstResponder {
+            searchBar.searchTextField.becomeFirstResponder()
+        } else if !isFirstResponder, searchBar.searchTextField.isFirstResponder {
+            searchBar.searchTextField.resignFirstResponder()
         }
     }
 
@@ -2447,12 +3220,12 @@ struct NativeSearchField: UIViewRepresentable {
         let dark = theme.isDark
         let textColor = dark ? UIColor.white.withAlphaComponent(0.95) : UIColor.label
         let placeholderColor = dark ? UIColor.white.withAlphaComponent(0.52) : UIColor.secondaryLabel
-        let baseColor = UIColor(theme.glassBase)
 
         UIView.performWithoutAnimation {
             searchBar.overrideUserInterfaceStyle = dark ? .dark : .light
             searchBar.barTintColor = .clear
             searchBar.backgroundColor = .clear
+            searchBar.isTranslucent = true
             searchBar.searchTextField.overrideUserInterfaceStyle = dark ? .dark : .light
             searchBar.searchTextField.keyboardAppearance = dark ? .dark : .light
             searchBar.searchTextField.textColor = textColor
@@ -2466,8 +3239,9 @@ struct NativeSearchField: UIViewRepresentable {
             searchBar.searchTextField.layer.cornerCurve = .continuous
             searchBar.searchTextField.layer.cornerRadius = 18
             searchBar.searchTextField.layer.borderWidth = 0
-            searchBar.searchTextField.clipsToBounds = true
-            searchBar.searchTextField.backgroundColor = baseColor
+            searchBar.searchTextField.clipsToBounds = false
+            searchBar.searchTextField.borderStyle = .none
+            searchBar.searchTextField.backgroundColor = .clear
             searchBar.searchTextField.textContentType = nil
             searchBar.searchTextField.clearButtonMode = .whileEditing
             searchBar.searchTextField.attributedPlaceholder = NSAttributedString(
@@ -2512,12 +3286,10 @@ struct NativeSearchField: UIViewRepresentable {
 
         func searchBarTextDidBeginEditing(_ searchBar: UISearchBar) {
             isFirstResponder.wrappedValue = true
-            searchBar.setShowsCancelButton(true, animated: true)
         }
 
         func searchBarTextDidEndEditing(_ searchBar: UISearchBar) {
             isFirstResponder.wrappedValue = false
-            searchBar.setShowsCancelButton(!text.wrappedValue.isEmpty, animated: true)
         }
 
         func searchBarShouldEndEditing(_ searchBar: UISearchBar) -> Bool {
@@ -2536,7 +3308,7 @@ struct LibrarySettingsSheet: View {
             Form {
                 Section("Appearance") {
                     Picker("Theme", selection: Binding(get: { store.themePreference }, set: { store.setTheme($0) })) {
-                        ForEach(ReaderTheme.allCases) { theme in
+                        ForEach(ReaderTheme.displayOrder) { theme in
                             Text(theme.label).tag(theme)
                         }
                     }
@@ -2693,7 +3465,10 @@ struct CompactReaderDestination: View {
                     .contentShape(Circle())
             }
             .foregroundStyle(store.theme.primary)
-            .readerGlassIconButton(theme: store.theme)
+            .readerStableGlassCircle(theme: store.theme)
+            .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
+            .preferredColorScheme(store.theme.isDark ? .dark : .light)
+            .id("reader-back-\(store.theme.rawValue)")
             .padding(.leading, 18)
             .padding(.top, 10)
             .opacity(chromeVisible ? 1 : 0)
@@ -2703,6 +3478,12 @@ struct CompactReaderDestination: View {
         }
         .contentShape(Rectangle())
         .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
+        .toolbarBackground(store.theme.background, for: .navigationBar)
+        .background(store.theme.background.ignoresSafeArea())
+        .ignoresSafeArea(.container, edges: .top)
+        .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
+        .preferredColorScheme(store.theme.isDark ? .dark : .light)
         .readerSystemChromeHidden(!chromeVisible)
         .background(NavigationGestureConfigurator().frame(width: 0, height: 0))
         .simultaneousGesture(edgeBackGesture)
@@ -2818,7 +3599,7 @@ struct ArticleSidebar: View {
                         selecting: false
                     )
                     .tag(article.id)
-                    .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                    .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
                     .contextMenu {
@@ -2879,10 +3660,7 @@ struct ArticleSidebar: View {
             .scrollContentBackground(.hidden)
             .onChange(of: store.search) { _, _ in
                 searchTask?.cancel()
-                searchTask = Task {
-                    guard !Task.isCancelled else { return }
-                    await store.loadArticles()
-                }
+                store.applyLocalSearch()
             }
         }
     }
@@ -2897,36 +3675,29 @@ struct ArticleRow: View {
     var selecting: Bool = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .center, spacing: 10) {
             if selecting {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 22, weight: .regular))
+                    .font(.system(size: 20, weight: .regular))
                     .foregroundStyle(selected ? Color.accentColor : theme.secondary.opacity(0.55))
-                    .padding(.top, 6)
             }
-            VStack(spacing: 6) {
+            VStack(spacing: 4) {
                 ArticleFavicon(article: article, theme: theme)
                 if article.readAt == nil {
                     Circle()
                         .fill(Color.accentColor)
-                        .frame(width: 7, height: 7)
+                        .frame(width: 6, height: 6)
                         .padding(.top, -2)
                 }
             }
-            .padding(.top, 2)
 
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(article.title)
-                    .font(.system(.headline, design: .default, weight: article.readAt == nil ? .semibold : .regular))
+                    .font(.system(size: 15.5, weight: .bold, design: .default))
                     .lineLimit(2)
                     .foregroundStyle(theme.primary)
-                if let description = article.description, !description.isEmpty {
-                    Text(description)
-                        .font(.system(.subheadline))
-                        .foregroundStyle(theme.secondary)
-                        .lineLimit(2)
-                }
-                HStack(spacing: 8) {
+                    .lineSpacing(0)
+                HStack(spacing: 6) {
                     if showsModeBadge {
                         HStack(spacing: 3) {
                             Image(systemName: article.archived ? "archivebox.fill" : "tray.fill")
@@ -2941,29 +3712,36 @@ struct ArticleRow: View {
                     }
                     if let siteName = article.siteName {
                         Text(siteName)
-                            .font(.caption)
+                            .font(.system(size: 13, weight: .regular, design: .default))
                             .foregroundStyle(theme.secondary.opacity(0.78))
                     }
                     if let ttr = article.ttr {
                         Text("\(ttr) min")
-                            .font(.caption)
+                            .font(.system(size: 13, weight: .regular, design: .default))
                             .foregroundStyle(theme.secondary.opacity(0.78))
                     }
                     if progress > 0.01 {
                         Spacer(minLength: 0)
-                        Text("\(Int((progress * 100).rounded()))%")
-                            .font(.caption)
-                            .monospacedDigit()
-                            .foregroundStyle(Color.accentColor)
+                        if progress >= 0.995 {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 14, weight: .semibold, design: .default))
+                                .foregroundStyle(Color.green)
+                        } else {
+                            Text("\(Int((progress * 100).rounded()))%")
+                                .font(.system(size: 13, weight: .medium, design: .default))
+                                .monospacedDigit()
+                                .foregroundStyle(Color.accentColor)
+                        }
                     }
                 }
             }
         }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .frame(minHeight: 100, alignment: .topLeading)
+        .padding(.vertical, 8)
+        .padding(.leading, 24)
+        .padding(.trailing, 24)
+        .frame(minHeight: 68, alignment: .topLeading)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .fixedSize(horizontal: false, vertical: true)
+        .contentShape(Rectangle())
         .background(selected ? theme.selectedPanel : Color.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
@@ -3118,11 +3896,16 @@ struct ReaderDetailView: View {
     var onChromeVisibilityChange: ((Bool) -> Void)?
     let onArchive: () -> Void
     let onDelete: () -> Void
-    @State private var showPreferences = true
-    @State private var lastScrollY: CGFloat?
+    @State private var showPreferences = false
     @State private var didRestoreScrollPosition = false
+    @StateObject private var scrollTracker = ReaderScrollTracker()
 
     var body: some View {
+        #if os(iOS)
+        let shouldRestoreScrollPosition = store.progress(for: article.id) > 0.02 && !didRestoreScrollPosition
+        #else
+        let shouldRestoreScrollPosition = false
+        #endif
         ZStack(alignment: .bottom) {
             GeometryReader { proxy in
                 let outerWidth = min(proxy.size.width, contentWidth)
@@ -3168,15 +3951,18 @@ struct ReaderDetailView: View {
                     .padding(.horizontal, horizontalPadding)
                     .frame(width: outerWidth, alignment: .leading)
                     .frame(maxWidth: .infinity)
+                    .overlay(alignment: .topLeading) {
+                        #if os(iOS)
+                        ScrollPositionRestorer(
+                            progress: store.progress(for: article.id),
+                            didRestore: $didRestoreScrollPosition
+                        )
+                        .frame(width: 0, height: 0)
+                        .accessibilityHidden(true)
+                        #endif
+                    }
                 }
-                #if os(iOS)
-                .background(
-                    ScrollPositionRestorer(
-                        progress: store.progress(for: article.id),
-                        didRestore: $didRestoreScrollPosition
-                    )
-                )
-                #endif
+                .opacity(shouldRestoreScrollPosition ? 0 : 1)
             }
 
             ReaderCommandBar(store: store, article: article, onArchive: onArchive, onDelete: onDelete)
@@ -3189,10 +3975,26 @@ struct ReaderDetailView: View {
         .background(store.theme.background)
         .onAppear {
             didRestoreScrollPosition = false
-            setChromeVisible(true)
+            let startsAtTop = store.progress(for: article.id) <= 0.02
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                showPreferences = startsAtTop
+            }
+            scrollTracker.lastY = nil
+            scrollTracker.lastKnownProgress = store.progress(for: article.id)
+            scrollTracker.lastReportedProgress = scrollTracker.lastKnownProgress
+            setChromeVisible(startsAtTop)
         }
         .onDisappear {
+            store.setProgress(scrollTracker.lastKnownProgress, articleId: article.id, forcePersist: true)
             setChromeVisible(true)
+        }
+        .onChange(of: didRestoreScrollPosition) { _, restored in
+            guard restored else { return }
+            scrollTracker.lastKnownProgress = store.progress(for: article.id)
+            scrollTracker.lastReportedProgress = scrollTracker.lastKnownProgress
+            setChromeVisible(false)
         }
     }
 
@@ -3230,27 +4032,44 @@ struct ReaderDetailView: View {
 
     private func updatePreferenceVisibility(_ state: ReaderScrollState) {
         let y = state.y
-        guard let lastScrollY else {
-            self.lastScrollY = y
+        let storedProgress = store.progress(for: article.id)
+        if !didRestoreScrollPosition && storedProgress > 0.02 {
+            scrollTracker.lastY = y
+            setChromeVisible(false)
+            return
+        }
+        scrollTracker.lastKnownProgress = state.progress
+        guard let lastScrollY = scrollTracker.lastY else {
+            scrollTracker.lastY = y
             setChromeVisible(y > -72)
-            store.setProgress(state.progress, articleId: article.id)
+            reportProgressIfNeeded(state.progress)
             return
         }
 
         if y >= -8 {
             setChromeVisible(true)
-        } else if y < -72 || y < lastScrollY - 3 {
+        } else if y < -72 || y < lastScrollY - 4 {
             setChromeVisible(false)
-        } else if y > lastScrollY + 16 {
+        } else if y > lastScrollY + 1 {
             setChromeVisible(true)
         }
-        store.setProgress(state.progress, articleId: article.id)
-        self.lastScrollY = y
+        reportProgressIfNeeded(state.progress)
+        scrollTracker.lastY = y
+    }
+
+    private func reportProgressIfNeeded(_ progress: Double) {
+        let previous = scrollTracker.lastReportedProgress
+        guard abs(progress - previous) >= 0.05
+            || (progress >= 0.995 && previous < 0.995)
+            || (progress <= 0.002 && previous > 0.002) else { return }
+        scrollTracker.lastReportedProgress = progress
+        store.setProgress(progress, articleId: article.id)
     }
 
     private func setChromeVisible(_ visible: Bool) {
-        guard showPreferences != visible else { return }
-        showPreferences = visible
+        if showPreferences != visible {
+            showPreferences = visible
+        }
         onChromeVisibilityChange?(visible)
         #if os(iOS)
         NotificationCenter.default.post(name: .readerChromeVisibilityChanged, object: visible)
@@ -3284,6 +4103,7 @@ struct ReaderCommandBar: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            #if os(iOS)
             Button {
                 shareURL = articleURL
             } label: {
@@ -3304,6 +4124,18 @@ struct ReaderCommandBar: View {
                 ActivityShareSheet(activityItems: [wrapper.url])
                     .ignoresSafeArea()
             }
+            #else
+            ShareLink(item: articleURL) {
+                Image(systemName: "square.and.arrow.up")
+                    .frame(width: 38, height: 38)
+                    .contentShape(Circle())
+                    .accessibilityLabel("Share")
+            }
+            .foregroundStyle(store.theme.primary)
+            .readerGlassBarButton(theme: store.theme)
+            .background(commandLoupe(for: .share))
+            .simultaneousGesture(commandPress(.share))
+            #endif
 
             Button(action: onArchive) {
                 Image(systemName: currentArticle.archived ? "tray.and.arrow.up" : "archivebox")
@@ -3332,13 +4164,15 @@ struct ReaderCommandBar: View {
             #if os(iOS)
             .sheet(isPresented: $showingSettings) {
                 ReaderSettingsPanel(store: store)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 2)
+                    .padding(.bottom, 8)
                     .background(.clear)
-                    .presentationDetents([.height(318), .medium])
+                    .presentationDetents([.height(258), .medium])
                     .presentationDragIndicator(.visible)
                     .presentationBackground(.clear)
-                    .preferredColorScheme(store.themePreference.scheme)
+                    .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
+                    .preferredColorScheme(store.theme.isDark ? .dark : .light)
             }
             #else
             .popover(isPresented: $showingSettings, arrowEdge: .bottom) {
@@ -3346,7 +4180,8 @@ struct ReaderCommandBar: View {
                     .frame(width: 340)
                     .padding(18)
                     .background(store.theme.background)
-                    .preferredColorScheme(store.themePreference.scheme)
+                    .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
+                    .preferredColorScheme(store.theme.isDark ? .dark : .light)
             }
             #endif
             .onChange(of: showingSettings) { _, visible in
@@ -3384,12 +4219,15 @@ struct ReaderCommandBar: View {
             .readerGlassBarButton(theme: store.theme)
             .background(commandLoupe(for: .more))
             .simultaneousGesture(commandPress(.more))
-            .preferredColorScheme(store.themePreference.scheme)
+            .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
+            .preferredColorScheme(store.theme.isDark ? .dark : .light)
         }
         .font(.system(size: 16, weight: .semibold, design: .default))
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .readerGlassBarBackground(theme: store.theme)
+        .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
+        .preferredColorScheme(store.theme.isDark ? .dark : .light)
         .padding(.horizontal, 20)
     }
 
@@ -3462,23 +4300,33 @@ struct ReaderSettingsPanel: View {
     @ObservedObject var store: ReaderStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SettingsSection(title: "Theme", theme: store.theme) {
-                Picker("Theme", selection: Binding(get: { store.themePreference }, set: { store.setTheme($0) })) {
-                    ForEach(ReaderTheme.allCases) { theme in
-                        Text(theme.label).tag(theme)
+        VStack(alignment: .leading, spacing: 15) {
+            SettingsMenuRow(title: "Theme", value: store.themePreference.label, theme: store.theme) {
+                ForEach(ReaderTheme.displayOrder) { theme in
+                    Button {
+                        store.setTheme(theme)
+                    } label: {
+                        if theme == store.themePreference {
+                            Label(theme.label, systemImage: "checkmark")
+                        } else {
+                            Text(theme.label)
+                        }
                     }
                 }
-                .pickerStyle(.segmented)
             }
 
-            SettingsSection(title: "Font", theme: store.theme) {
-                Picker("Font", selection: Binding(get: { store.readerFont }, set: { store.setReaderFont($0) })) {
-                    ForEach(ReaderFont.allCases) { font in
-                        Text(font.label).tag(font)
+            SettingsMenuRow(title: "Font", value: store.readerFont.label, theme: store.theme) {
+                ForEach(ReaderFont.allCases) { font in
+                    Button {
+                        store.setReaderFont(font)
+                    } label: {
+                        if font == store.readerFont {
+                            Label(font.label, systemImage: "checkmark")
+                        } else {
+                            Text(font.label)
+                        }
                     }
                 }
-                .pickerStyle(.segmented)
             }
 
             SettingsSection(title: "Font Size", value: "\(Int(store.textSize))", theme: store.theme) {
@@ -3489,11 +4337,55 @@ struct ReaderSettingsPanel: View {
                 Slider(value: Binding(get: { store.lineSpacing }, set: { store.setLineSpacing($0) }), in: 2...18, step: 1)
             }
         }
-        .padding(14)
-        .readerGlassBarBackground(theme: store.theme)
+        .padding(.horizontal, 18)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
+        .background(Color.clear)
         .tint(store.theme.primary)
         .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
         .foregroundStyle(store.theme.primary)
+    }
+}
+
+struct SettingsMenuRow<MenuContent: View>: View {
+    let title: String
+    let value: String
+    let theme: ReaderTheme
+    @ViewBuilder let menuContent: MenuContent
+
+    init(title: String, value: String, theme: ReaderTheme, @ViewBuilder menuContent: () -> MenuContent) {
+        self.title = title
+        self.value = value
+        self.theme = theme
+        self.menuContent = menuContent()
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 14) {
+            Text(title)
+                .font(.system(.body, design: .default, weight: .regular))
+                .foregroundStyle(theme.primary)
+
+            Spacer(minLength: 18)
+
+            Menu {
+                menuContent
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(value)
+                        .font(.system(.body, design: .default, weight: .medium))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .baselineOffset(1)
+                }
+                .foregroundStyle(theme.secondary)
+            }
+            .buttonStyle(.plain)
+            .environment(\.colorScheme, theme.isDark ? .dark : .light)
+            .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minHeight: 30)
     }
 }
 
@@ -3511,7 +4403,7 @@ struct SettingsSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(title)
                 Spacer()
@@ -3520,18 +4412,24 @@ struct SettingsSection<Content: View>: View {
                         .foregroundStyle(theme.secondary)
                 }
             }
-            .font(.system(.footnote, design: .default, weight: .medium))
+            .font(.system(.body, design: .default, weight: .regular))
             .foregroundStyle(theme.primary)
 
             content
         }
-        .padding(.vertical, 1)
+        .padding(.vertical, 2)
     }
 }
 
 struct ReaderScrollState: Equatable {
     let y: CGFloat
     let progress: Double
+}
+
+final class ReaderScrollTracker: ObservableObject {
+    var lastY: CGFloat?
+    var lastKnownProgress: Double = 0
+    var lastReportedProgress: Double = 0
 }
 
 struct TrackableScrollView<Content: View>: View {
@@ -3551,7 +4449,7 @@ struct TrackableScrollView<Content: View>: View {
                     let scrollableHeight = max(1, geometry.contentSize.height - geometry.containerSize.height)
                     let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
                     let remaining = geometry.contentSize.height - bottomOffset
-                    let progress = remaining <= 28 ? 1 : min(1, max(0, geometry.contentOffset.y / scrollableHeight))
+                    let progress = remaining <= 140 ? 1 : min(1, max(0, geometry.contentOffset.y / scrollableHeight))
                     return ReaderScrollState(y: -geometry.contentOffset.y, progress: progress)
                 } action: { _, state in
                     onScrollChange(state)
@@ -3586,6 +4484,10 @@ struct ScrollPositionRestorer: UIViewRepresentable {
     let progress: Double
     @Binding var didRestore: Bool
 
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
     func makeUIView(context: Context) -> UIView {
         let view = UIView(frame: .zero)
         view.isUserInteractionEnabled = false
@@ -3593,17 +4495,53 @@ struct ScrollPositionRestorer: UIViewRepresentable {
     }
 
     func updateUIView(_ view: UIView, context: Context) {
-        guard !didRestore, progress > 0.02 else { return }
-        DispatchQueue.main.async {
-            guard !didRestore,
-                  let scrollView = view.enclosingScrollView else {
+        context.coordinator.restore(progress: progress, didRestore: $didRestore, from: view)
+    }
+
+    final class Coordinator {
+        private var attempts = 0
+        private var restoring = false
+
+        func restore(progress: Double, didRestore: Binding<Bool>, from view: UIView) {
+            guard !didRestore.wrappedValue, progress > 0.02, !restoring else { return }
+            attempts = 0
+            restoring = true
+            attemptRestore(progress: progress, didRestore: didRestore, from: view)
+        }
+
+        private func attemptRestore(progress: Double, didRestore: Binding<Bool>, from view: UIView) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + (attempts == 0 ? 0 : 0.035)) {
+                guard !didRestore.wrappedValue else {
+                    self.restoring = false
+                    return
+                }
+                guard let scrollView = view.enclosingScrollView else {
+                    self.retry(progress: progress, didRestore: didRestore, from: view)
+                    return
+                }
+
+                scrollView.layoutIfNeeded()
+                let maxOffset = max(0, scrollView.contentSize.height - scrollView.bounds.height)
+                guard maxOffset > 1 else {
+                    self.retry(progress: progress, didRestore: didRestore, from: view)
+                    return
+                }
+
+                let targetY = min(maxOffset, max(0, maxOffset * progress))
+                scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: false)
+                didRestore.wrappedValue = true
+                self.restoring = false
+            }
+        }
+
+        private func retry(progress: Double, didRestore: Binding<Bool>, from view: UIView) {
+            attempts += 1
+            guard attempts < 14 else {
+                didRestore.wrappedValue = true
+                restoring = false
                 return
             }
-            let maxOffset = max(0, scrollView.contentSize.height - scrollView.bounds.height)
-            guard maxOffset > 1 else { return }
-            let targetY = min(maxOffset, max(0, maxOffset * progress))
-            scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: false)
-            didRestore = true
+            attemptRestore(progress: progress, didRestore: didRestore, from: view)
         }
     }
 }
@@ -3766,10 +4704,12 @@ struct NativeSelectableTextView: UIViewRepresentable {
         if context.coordinator.signature != signature {
             context.coordinator.signature = signature
             textView.attributedText = attributedText
+            recalculateHeight(textView)
+        } else if height <= 1 {
+            recalculateHeight(textView)
         }
         textView.textColor = UIColor(theme.primary)
         textView.textContainer.size = CGSize(width: availableWidth, height: .greatestFiniteMagnitude)
-        recalculateHeight(textView)
     }
 
     private var attributedText: NSAttributedString {
@@ -3829,7 +4769,6 @@ struct NativeSelectableTextView: UIViewRepresentable {
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
-            parent.recalculateHeight(textView)
         }
 
         func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
@@ -3950,7 +4889,13 @@ struct NativeSelectableTextView: UIViewRepresentable {
                 parent.onAddHighlight(selectedText)
             }
             textView.attributedText = mutable
-            textView.selectedRange = targetRanges.last ?? .init(location: 0, length: 0)
+            let lastRange = targetRanges.last ?? .init(location: 0, length: 0)
+            textView.selectedRange = NSRange(location: min(NSMaxRange(lastRange), mutable.length), length: 0)
+            textView.selectedTextRange = nil
+            textView.resignFirstResponder()
+            if #available(iOS 16.0, *) {
+                editMenuInteraction?.dismissMenu()
+            }
             parent.recalculateHeight(textView)
         }
 
