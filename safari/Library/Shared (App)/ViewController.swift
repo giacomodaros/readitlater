@@ -860,6 +860,7 @@ private struct MatterImportRecord {
         \(sourceLine)
         <p>This article was imported from Matter using the saved library history export. The original article link, title, author, publisher, queue state, read state, and word count are preserved so it can be organized in Library even when the source page cannot be fetched during import.</p>
         <p>Open the original URL from the article menu to read the full source page if the archived text is not available in this export.</p>
+        <p>The Matter export does not always include the full article body. Library keeps this import as a durable entry with the original source attached, then places it in Inbox or Archive according to the Matter queue field.</p>
         </article>
         </body>
         </html>
@@ -881,6 +882,7 @@ private struct MatterImportRecord {
         \(sourceLine)
         <p>This article was imported from Matter using the saved library history export. The original article link, title, author, publisher, queue state, read state, and word count are preserved so it can be organized in Library even when the source page cannot be fetched during import.</p>
         <p>Open the original URL from the article menu to read the full source page if the archived text is not available in this export.</p>
+        <p>The Matter export does not always include the full article body. Library keeps this import as a durable entry with the original source attached, then places it in Inbox or Archive according to the Matter queue field.</p>
         """
     }
 
@@ -1738,20 +1740,7 @@ final class ReaderStore: ObservableObject {
 
                 do {
                     let shouldArchive = !record.inQueue
-                    var imported = try await api.save(
-                        url: normalizedURL.absoluteString,
-                        html: record.fallbackHTML,
-                        source: "matter",
-                        metadataOnly: true,
-                        title: record.title,
-                        author: record.author,
-                        siteName: record.publisher,
-                        description: nil,
-                        content: record.fallbackContent,
-                        wordCount: record.wordCount,
-                        archived: shouldArchive,
-                        readAt: record.read
-                    )
+                    var imported = try await saveMatterRecord(record, normalizedURL: normalizedURL, shouldArchive: shouldArchive)
                     var stateUpdateError: Error?
                     if imported.archived != shouldArchive {
                         do {
@@ -1793,6 +1782,52 @@ final class ReaderStore: ObservableObject {
             errorMessage = error.localizedDescription
             return nil
         }
+    }
+
+    private func saveMatterRecord(_ record: MatterImportRecord, normalizedURL: URL, shouldArchive: Bool) async throws -> Article {
+        var errors: [String] = []
+
+        do {
+            return try await api.save(
+                url: normalizedURL.absoluteString,
+                html: record.fallbackHTML,
+                source: "matter",
+                metadataOnly: true,
+                title: record.title,
+                author: record.author,
+                siteName: record.publisher,
+                description: nil,
+                content: record.fallbackContent,
+                wordCount: record.wordCount,
+                archived: shouldArchive,
+                readAt: record.read
+            )
+        } catch {
+            errors.append("metadata save: \(error.localizedDescription)")
+        }
+
+        do {
+            return try await api.save(
+                url: normalizedURL.absoluteString,
+                html: record.fallbackHTML,
+                title: record.title,
+                author: record.author,
+                siteName: record.publisher,
+                description: nil,
+                content: record.fallbackContent,
+                wordCount: record.wordCount
+            )
+        } catch {
+            errors.append("html fallback: \(error.localizedDescription)")
+        }
+
+        do {
+            return try await api.save(url: normalizedURL.absoluteString)
+        } catch {
+            errors.append("source fetch: \(error.localizedDescription)")
+        }
+
+        throw ReaderAPIError.server(errors.joined(separator: " | "))
     }
 
     private func csvEscape(_ value: String) -> String {
@@ -1900,7 +1935,7 @@ final class ReaderStore: ObservableObject {
         return appBaseURL
     }
 
-    func setProgress(_ value: Double, articleId: String, forcePersist: Bool = false) {
+    func setProgress(_ value: Double, articleId: String, forcePersist: Bool = false, markReadOnCompletion: Bool = true) {
         let progress = max(0, min(1, value))
         let previous = self.progress(for: articleId)
         let crossedTop = progress <= 0.002 && previous > 0.002
@@ -1916,7 +1951,8 @@ final class ReaderStore: ObservableObject {
             persistedProgress[articleId] = progress
             saveCache()
         }
-        if progress >= 0.995,
+        if markReadOnCompletion,
+           progress >= 0.995,
            selectedArticle?.id == articleId,
            selectedArticle?.readAt == nil,
            !markingReadArticleIds.contains(articleId) {
@@ -3518,24 +3554,27 @@ struct CompactReaderDestination: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .frame(width: 44, height: 44)
-                    .contentShape(Circle())
+            GeometryReader { proxy in
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: 44, height: 44)
+                        .contentShape(Circle())
+                }
+                .foregroundStyle(store.theme.primary)
+                .readerStableGlassCircle(theme: store.theme)
+                .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
+                .preferredColorScheme(store.theme.isDark ? .dark : .light)
+                .id("reader-back-\(store.theme.rawValue)")
+                .padding(.leading, 18)
+                .padding(.top, max(proxy.safeAreaInsets.top + 12, 58))
+                .opacity(chromeVisible ? 1 : 0)
+                .offset(y: chromeVisible ? 0 : -18)
+                .animation(.spring(response: 0.32, dampingFraction: 0.86), value: chromeVisible)
+                .allowsHitTesting(chromeVisible)
             }
-            .foregroundStyle(store.theme.primary)
-            .readerStableGlassCircle(theme: store.theme)
-            .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
-            .preferredColorScheme(store.theme.isDark ? .dark : .light)
-            .id("reader-back-\(store.theme.rawValue)")
-            .padding(.leading, 18)
-            .padding(.top, 10)
-            .opacity(chromeVisible ? 1 : 0)
-            .offset(y: chromeVisible ? 0 : -18)
-            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: chromeVisible)
-            .allowsHitTesting(chromeVisible)
+            .frame(width: 110, height: 168, alignment: .topLeading)
         }
         .contentShape(Rectangle())
         .toolbar(.hidden, for: .navigationBar)
@@ -4132,7 +4171,7 @@ struct ReaderDetailView: View {
             || (progress >= 0.995 && previous < 0.995)
             || (progress <= 0.002 && previous > 0.002) else { return }
         scrollTracker.lastReportedProgress = progress
-        store.setProgress(progress, articleId: article.id)
+        store.setProgress(progress, articleId: article.id, markReadOnCompletion: false)
     }
 
     private func setChromeVisible(_ visible: Bool) {
@@ -4513,14 +4552,11 @@ struct TrackableScrollView<Content: View>: View {
             .coordinateSpace(name: "readerScroll")
 
         #if os(iOS)
-        let instrumentedScrollView = scrollView
+        scrollView
             .background(ScrollViewOffsetObserver(onScrollChange: onScrollChange).frame(width: 0, height: 0))
         #else
-        let instrumentedScrollView = scrollView
-        #endif
-
         if #available(iOS 18.0, macOS 15.0, *) {
-            instrumentedScrollView
+            scrollView
                 .onScrollGeometryChange(for: ReaderScrollState.self) { geometry in
                     let scrollableHeight = max(1, geometry.contentSize.height - geometry.containerSize.height)
                     let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
@@ -4531,11 +4567,12 @@ struct TrackableScrollView<Content: View>: View {
                     onScrollChange(state)
                 }
         } else {
-            instrumentedScrollView
+            scrollView
                 .onPreferenceChange(ScrollOffsetPreferenceKey.self) { y in
                     onScrollChange(ReaderScrollState(y: y, progress: min(1, max(0, -y / 1400))))
                 }
         }
+        #endif
     }
 
     private var legacyOffsetProbe: some View {
