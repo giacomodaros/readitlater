@@ -71,7 +71,24 @@ export async function POST(req: NextRequest) {
       where: { userId_url: { userId: user.id, url } },
       include: { labels: true },
     });
+    const archived = typeof body.archived === "boolean" ? body.archived : undefined;
+    const readAt = body.readAt === true ? new Date() : body.readAt === false || body.readAt === null ? null : undefined;
+
     if (existing) {
+      if (archived !== undefined || readAt !== undefined) {
+        await prisma.article.updateMany({
+          where: { id: existing.id, userId: user.id },
+          data: {
+            ...(archived !== undefined && { archived }),
+            ...(readAt !== undefined && { readAt }),
+          },
+        });
+        const updated = await prisma.article.findUnique({
+          where: { id: existing.id },
+          include: { labels: true },
+        });
+        return NextResponse.json(updated);
+      }
       return NextResponse.json(existing);
     }
 
@@ -83,7 +100,12 @@ export async function POST(req: NextRequest) {
         : await extractArticle(url);
 
     const article = await prisma.article.create({
-      data: { ...data, userId: user.id },
+      data: {
+        ...data,
+        userId: user.id,
+        ...(archived !== undefined && { archived }),
+        ...(readAt !== undefined && { readAt }),
+      },
       include: { labels: true },
     });
     return NextResponse.json(article, { status: 201 });

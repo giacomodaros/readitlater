@@ -697,7 +697,9 @@ final class ReaderAPI {
         siteName: String? = nil,
         description: String? = nil,
         content: String? = nil,
-        wordCount: Int? = nil
+        wordCount: Int? = nil,
+        archived: Bool? = nil,
+        readAt: Bool? = nil
     ) async throws -> Article {
         try await send(path: "api/articles", method: "POST", body: SaveArticleBody(
             url: url,
@@ -709,7 +711,9 @@ final class ReaderAPI {
             siteName: siteName,
             description: description,
             content: content,
-            wordCount: wordCount
+            wordCount: wordCount,
+            archived: archived,
+            readAt: readAt
         ))
     }
 
@@ -785,6 +789,8 @@ private struct SaveArticleBody: Encodable {
     let description: String?
     let content: String?
     let wordCount: Int?
+    let archived: Bool?
+    let readAt: Bool?
 }
 
 struct MatterImportResult: Equatable {
@@ -798,11 +804,14 @@ struct MatterImportResult: Equatable {
     var imported: Int { queued + archived }
 
     var summary: String {
-        var parts = ["Imported \(imported)"]
+        var parts = ["Parsed \(totalRows)", "Imported \(imported)"]
         parts.append("\(queued) inbox")
         parts.append("\(archived) archive")
         if skipped > 0 { parts.append("\(skipped) skipped") }
         if failed > 0 { parts.append("\(failed) failed") }
+        if imported == 0, let lastError {
+            parts.append(lastError)
+        }
         return parts.joined(separator: " · ")
     }
 }
@@ -818,7 +827,9 @@ private struct MatterImportRecord {
 
     var normalizedURL: URL? {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let parsed = URL(string: trimmed) else { return nil }
+        guard !trimmed.isEmpty else { return nil }
+        let normalized = trimmed.contains("://") ? trimmed : "https://\(trimmed)"
+        guard let parsed = URL(string: normalized) else { return nil }
         guard parsed.scheme == "http" || parsed.scheme == "https" else { return nil }
         return parsed
     }
@@ -830,6 +841,8 @@ private struct MatterImportRecord {
         let displayTitle = titleValue.isEmpty ? normalizedURL?.host ?? "Imported article" : titleValue
         let byline = authorValue.isEmpty ? "" : "<p class=\"byline\">By \(Self.escape(authorValue))</p>"
         let publisherMeta = publisherValue.isEmpty ? "" : "<meta property=\"og:site_name\" content=\"\(Self.escape(publisherValue))\">"
+        let publisherLine = publisherValue.isEmpty ? "" : "<p>Publisher: \(Self.escape(publisherValue))</p>"
+        let sourceLine = normalizedURL.map { "<p>Original URL: <a href=\"\(Self.escape($0.absoluteString))\">\(Self.escape($0.absoluteString))</a></p>" } ?? ""
 
         return """
         <!doctype html>
@@ -843,7 +856,10 @@ private struct MatterImportRecord {
         <article>
         <h1>\(Self.escape(displayTitle))</h1>
         \(byline)
-        <p>Imported from Matter.</p>
+        \(publisherLine)
+        \(sourceLine)
+        <p>This article was imported from Matter using the saved library history export. The original article link, title, author, publisher, queue state, read state, and word count are preserved so it can be organized in Library even when the source page cannot be fetched during import.</p>
+        <p>Open the original URL from the article menu to read the full source page if the archived text is not available in this export.</p>
         </article>
         </body>
         </html>
@@ -857,7 +873,15 @@ private struct MatterImportRecord {
         let titleParagraph = titleValue.isEmpty ? "" : "<p><strong>\(Self.escape(titleValue))</strong></p>"
         let byline = authorValue.isEmpty ? "" : "<p>By \(Self.escape(authorValue))</p>"
         let publisherLine = publisherValue.isEmpty ? "" : "<p>\(Self.escape(publisherValue))</p>"
-        return "\(titleParagraph)\(byline)\(publisherLine)<p>Imported from Matter.</p>"
+        let sourceLine = normalizedURL.map { "<p><a href=\"\(Self.escape($0.absoluteString))\">\(Self.escape($0.absoluteString))</a></p>" } ?? ""
+        return """
+        \(titleParagraph)
+        \(byline)
+        \(publisherLine)
+        \(sourceLine)
+        <p>This article was imported from Matter using the saved library history export. The original article link, title, author, publisher, queue state, read state, and word count are preserved so it can be organized in Library even when the source page cannot be fetched during import.</p>
+        <p>Open the original URL from the article menu to read the full source page if the archived text is not available in this export.</p>
+        """
     }
 
     private static func escape(_ value: String) -> String {
@@ -1713,6 +1737,7 @@ final class ReaderStore: ObservableObject {
                 }
 
                 do {
+                    let shouldArchive = !record.inQueue
                     var imported = try await api.save(
                         url: normalizedURL.absoluteString,
                         html: record.fallbackHTML,
@@ -1723,14 +1748,24 @@ final class ReaderStore: ObservableObject {
                         siteName: record.publisher,
                         description: nil,
                         content: record.fallbackContent,
-                        wordCount: record.wordCount
+                        wordCount: record.wordCount,
+                        archived: shouldArchive,
+                        readAt: record.read
                     )
-                    let shouldArchive = !record.inQueue
+                    var stateUpdateError: Error?
                     if imported.archived != shouldArchive {
-                        imported = try await api.setArchived(shouldArchive, articleId: imported.id)
+                        do {
+                            imported = try await api.setArchived(shouldArchive, articleId: imported.id)
+                        } catch {
+                            stateUpdateError = error
+                        }
                     }
                     if record.read, imported.readAt == nil {
-                        imported = try await api.setRead(true, articleId: imported.id)
+                        do {
+                            imported = try await api.setRead(true, articleId: imported.id)
+                        } catch {
+                            stateUpdateError = error
+                        }
                     }
                     articleDetails[imported.id] = imported
                     if shouldArchive {
@@ -1738,9 +1773,13 @@ final class ReaderStore: ObservableObject {
                     } else {
                         result.queued += 1
                     }
+                    if let stateUpdateError {
+                        result.failed += 1
+                        result.lastError = "Imported \(normalizedURL.host ?? normalizedURL.absoluteString), but could not update archive/read state: \(stateUpdateError.localizedDescription)"
+                    }
                 } catch {
                     result.failed += 1
-                    result.lastError = error.localizedDescription
+                    result.lastError = "\(normalizedURL.absoluteString): \(error.localizedDescription)"
                 }
             }
 
@@ -2369,6 +2408,7 @@ private enum CompactLibraryPane: Hashable {
     case archive
     case settings
     case search
+    case searchPlaceholder
 }
 
 struct CompactLibraryView: View {
@@ -2404,8 +2444,8 @@ struct CompactLibraryView: View {
         !store.selectionMode && pane != .settings
     }
 
-    private var searchTabHidden: Bool {
-        pane == .settings || store.selectionMode
+    private var showsSearchTab: Bool {
+        pane != .settings && !store.selectionMode
     }
 
     private var resolvedColorScheme: ColorScheme {
@@ -2497,7 +2537,7 @@ struct CompactLibraryView: View {
         case .settings:
             store.selectionMode = false
             store.selectedIds.removeAll()
-        case .search:
+        case .search, .searchPlaceholder:
             break
         }
     }
@@ -2511,7 +2551,7 @@ struct CompactLibraryView: View {
             store.setArchiveMode(false)
         case .archive:
             store.setArchiveMode(true)
-        case .settings, .search:
+        case .settings, .search, .searchPlaceholder:
             break
         }
         withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
@@ -2544,7 +2584,10 @@ struct CompactLibraryView: View {
     }
 
     private func updatePaneSelection(_ selectedPane: CompactLibraryPane) {
-        guard !(selectedPane == .search && searchTabHidden) else {
+        guard selectedPane != .searchPlaceholder else {
+            return
+        }
+        guard !(selectedPane == .search && !showsSearchTab) else {
             return
         }
 
@@ -2573,11 +2616,20 @@ struct CompactLibraryView: View {
                 Tab("Settings", systemImage: "gearshape", value: CompactLibraryPane.settings) {
                     navigationPane(.settings)
                 }
-                Tab(value: CompactLibraryPane.search, role: .search) {
-                    searchPane
-                } label: {
-                    Label("Search", systemImage: "magnifyingglass")
-                        .opacity(searchTabHidden ? 0 : 1)
+                if showsSearchTab {
+                    Tab(value: CompactLibraryPane.search, role: .search) {
+                        searchPane
+                    } label: {
+                        Label("Search", systemImage: "magnifyingglass")
+                    }
+                } else {
+                    Tab(value: CompactLibraryPane.searchPlaceholder) {
+                        Color.clear
+                    } label: {
+                        Label("Search", systemImage: "magnifyingglass")
+                            .opacity(0)
+                            .accessibilityHidden(true)
+                    }
                 }
             }
             .toolbar(store.selectionMode ? .hidden : .visible, for: .tabBar)
@@ -2598,12 +2650,21 @@ struct CompactLibraryView: View {
                 navigationPane(.settings)
                     .tabItem { Label("Settings", systemImage: "gearshape") }
                     .tag(CompactLibraryPane.settings)
-                searchPane
-                    .tabItem {
-                        Label("Search", systemImage: "magnifyingglass")
-                            .opacity(searchTabHidden ? 0 : 1)
-                    }
-                    .tag(CompactLibraryPane.search)
+                if showsSearchTab {
+                    searchPane
+                        .tabItem {
+                            Label("Search", systemImage: "magnifyingglass")
+                        }
+                        .tag(CompactLibraryPane.search)
+                } else {
+                    Color.clear
+                        .tabItem {
+                            Label("Search", systemImage: "magnifyingglass")
+                                .opacity(0)
+                                .accessibilityHidden(true)
+                        }
+                        .tag(CompactLibraryPane.searchPlaceholder)
+                }
             }
             .toolbar(store.selectionMode ? .hidden : .visible, for: .tabBar)
             .readerNativeSearchable(active: searchAvailable, text: $store.search, isPresented: $searchPresented)
@@ -2742,8 +2803,8 @@ struct CompactLibraryView: View {
         .scrollContentBackground(.hidden)
         .background(Color.clear)
         .environment(\.defaultMinListRowHeight, 70)
-        .listRowSpacing(6)
-        .contentMargins(.top, 24, for: .scrollContent)
+        .listRowSpacing(0)
+        .contentMargins(.top, 16, for: .scrollContent)
         .contentMargins(.horizontal, 0, for: .scrollContent)
         .scrollDismissesKeyboard(.interactively)
     }
@@ -2787,9 +2848,9 @@ struct CompactLibraryView: View {
                     }
             }
         }
-        .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
-        .listRowBackground(store.theme.background)
+        .listRowBackground(Color.clear)
         .contextMenu {
             articleMenu(article)
         }
@@ -3736,13 +3797,21 @@ struct ArticleRow: View {
                 }
             }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 9)
         .padding(.leading, 24)
         .padding(.trailing, 24)
-        .frame(minHeight: 68, alignment: .topLeading)
+        .frame(minHeight: 70, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .background(selected ? theme.selectedPanel : Color.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background {
+            ZStack {
+                theme.background
+                if selected {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(theme.selectedPanel)
+                }
+            }
+        }
     }
 }
 
@@ -4048,10 +4117,10 @@ struct ReaderDetailView: View {
 
         if y >= -8 {
             setChromeVisible(true)
-        } else if y < -72 || y < lastScrollY - 4 {
-            setChromeVisible(false)
         } else if y > lastScrollY + 1 {
             setChromeVisible(true)
+        } else if y < lastScrollY - 4 || (showPreferences && y < -72) {
+            setChromeVisible(false)
         }
         reportProgressIfNeeded(state.progress)
         scrollTracker.lastY = y
@@ -4443,8 +4512,15 @@ struct TrackableScrollView<Content: View>: View {
         }
             .coordinateSpace(name: "readerScroll")
 
+        #if os(iOS)
+        let instrumentedScrollView = scrollView
+            .background(ScrollViewOffsetObserver(onScrollChange: onScrollChange).frame(width: 0, height: 0))
+        #else
+        let instrumentedScrollView = scrollView
+        #endif
+
         if #available(iOS 18.0, macOS 15.0, *) {
-            scrollView
+            instrumentedScrollView
                 .onScrollGeometryChange(for: ReaderScrollState.self) { geometry in
                     let scrollableHeight = max(1, geometry.contentSize.height - geometry.containerSize.height)
                     let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
@@ -4455,7 +4531,7 @@ struct TrackableScrollView<Content: View>: View {
                     onScrollChange(state)
                 }
         } else {
-            scrollView
+            instrumentedScrollView
                 .onPreferenceChange(ScrollOffsetPreferenceKey.self) { y in
                     onScrollChange(ReaderScrollState(y: y, progress: min(1, max(0, -y / 1400))))
                 }
@@ -4480,6 +4556,62 @@ struct ScrollOffsetPreferenceKey: PreferenceKey {
 }
 
 #if os(iOS)
+struct ScrollViewOffsetObserver: UIViewRepresentable {
+    let onScrollChange: (ReaderScrollState) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onScrollChange: onScrollChange)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        context.coordinator.onScrollChange = onScrollChange
+        context.coordinator.attach(from: view)
+    }
+
+    final class Coordinator {
+        var onScrollChange: (ReaderScrollState) -> Void
+        private weak var scrollView: UIScrollView?
+        private var offsetObservation: NSKeyValueObservation?
+        private var sizeObservation: NSKeyValueObservation?
+
+        init(onScrollChange: @escaping (ReaderScrollState) -> Void) {
+            self.onScrollChange = onScrollChange
+        }
+
+        func attach(from view: UIView) {
+            DispatchQueue.main.async {
+                guard let scrollView = view.enclosingScrollView else { return }
+                guard self.scrollView !== scrollView else {
+                    self.emit(scrollView)
+                    return
+                }
+                self.scrollView = scrollView
+                self.offsetObservation = scrollView.observe(\.contentOffset, options: [.new]) { [weak self] scrollView, _ in
+                    self?.emit(scrollView)
+                }
+                self.sizeObservation = scrollView.observe(\.contentSize, options: [.new]) { [weak self] scrollView, _ in
+                    self?.emit(scrollView)
+                }
+                self.emit(scrollView)
+            }
+        }
+
+        private func emit(_ scrollView: UIScrollView) {
+            let scrollableHeight = max(1, scrollView.contentSize.height - scrollView.bounds.height)
+            let bottomOffset = scrollView.contentOffset.y + scrollView.bounds.height
+            let remaining = scrollView.contentSize.height - bottomOffset
+            let progress = remaining <= 140 ? 1 : min(1, max(0, scrollView.contentOffset.y / scrollableHeight))
+            onScrollChange(ReaderScrollState(y: -scrollView.contentOffset.y, progress: progress))
+        }
+    }
+}
+
 struct ScrollPositionRestorer: UIViewRepresentable {
     let progress: Double
     @Binding var didRestore: Bool
