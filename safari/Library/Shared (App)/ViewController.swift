@@ -45,6 +45,7 @@ final class ReaderHostingController: UIHostingController<ReaderRootView> {
             guard let visible = notification.object as? Bool else { return }
             self?.statusBarHidden = !visible
             self?.setNeedsStatusBarAppearanceUpdate()
+            self?.view.window?.rootViewController?.setNeedsStatusBarAppearanceUpdate()
         }
     }
 
@@ -106,6 +107,36 @@ extension View {
         } else {
             self
         }
+    }
+
+    @ViewBuilder
+    func readerPaneScrollObserver(
+        threshold: CGFloat = 58,
+        _ onScrolledChange: @escaping (Bool) -> Void
+    ) -> some View {
+        #if os(iOS)
+        if #available(iOS 18.0, *) {
+            self.onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y > threshold
+            } action: { oldValue, newValue in
+                guard oldValue != newValue else { return }
+                onScrolledChange(newValue)
+            }
+        } else {
+            self
+        }
+        #else
+        if #available(macOS 15.0, *) {
+            self.onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y > threshold
+            } action: { oldValue, newValue in
+                guard oldValue != newValue else { return }
+                onScrolledChange(newValue)
+            }
+        } else {
+            self
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -317,6 +348,7 @@ class ViewController: PlatformViewController {
             guard let visible = notification.object as? Bool else { return }
             self?.statusBarHidden = !visible
             self?.setNeedsStatusBarAppearanceUpdate()
+            self?.view.window?.rootViewController?.setNeedsStatusBarAppearanceUpdate()
         }
         #elseif os(macOS)
         let hosting = NSHostingView(rootView: root)
@@ -346,7 +378,7 @@ class ViewController: PlatformViewController {
     }
 
     override var childForStatusBarHidden: UIViewController? {
-        hostingController
+        nil
     }
 
     override var childForStatusBarStyle: UIViewController? {
@@ -457,6 +489,10 @@ extension Article {
         self.archived = summary.archived
         self.readAt = summary.readAt
         self.labels = summary.labels
+    }
+
+    var isHydratedForReader: Bool {
+        !url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     func updating(archived: Bool? = nil, readAt: Date?? = nil) -> Article {
@@ -729,6 +765,15 @@ final class ReaderAPI {
         let _: EmptyResponse = try await send(path: "api/articles/\(id)", method: "DELETE")
     }
 
+    func importMatterCSV(data: Data) async throws -> MatterImportResult {
+        try await sendRaw(
+            path: "api/import/matter",
+            method: "POST",
+            contentType: "text/csv; charset=utf-8",
+            bodyData: data
+        )
+    }
+
     private func send<Response: Decodable>(path: String, method: String = "GET", queryItems: [URLQueryItem] = []) async throws -> Response {
         try await send(path: path, method: method, queryItems: queryItems, bodyData: nil)
     }
@@ -764,6 +809,34 @@ final class ReaderAPI {
         }
         return try decoder.decode(Response.self, from: data)
     }
+
+    private func sendRaw<Response: Decodable>(
+        path: String,
+        method: String,
+        contentType: String,
+        bodyData: Data
+    ) async throws -> Response {
+        guard let url = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)?.url else {
+            throw ReaderAPIError.invalidResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        if let token = tokenStore.token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = bodyData
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw ReaderAPIError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            let error = try? decoder.decode(ServerError.self, from: data)
+            throw ReaderAPIError.server(error?.error ?? "Request failed.")
+        }
+        return try decoder.decode(Response.self, from: data)
+    }
 }
 
 private struct EmptyResponse: Codable {}
@@ -793,7 +866,7 @@ private struct SaveArticleBody: Encodable {
     let readAt: Bool?
 }
 
-struct MatterImportResult: Equatable {
+struct MatterImportResult: Codable, Equatable {
     var totalRows = 0
     var queued = 0
     var archived = 0
@@ -898,6 +971,7 @@ private struct MatterImportRecord {
 private enum MatterCSVError: LocalizedError {
     case unreadable
     case missingColumns([String])
+    case empty
 
     var errorDescription: String? {
         switch self {
@@ -905,20 +979,30 @@ private enum MatterCSVError: LocalizedError {
             "The Matter CSV could not be read."
         case .missingColumns(let columns):
             "The Matter CSV is missing: \(columns.joined(separator: ", "))."
+        case .empty:
+            "The Matter CSV appears to be empty or contains no importable URLs."
         }
     }
 }
 
 private enum MatterCSVParser {
     static func records(from data: Data) throws -> [MatterImportRecord] {
-        guard let text = String(data: data, encoding: .utf8)
+        guard let decoded = String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .utf16)
             ?? String(data: data, encoding: .isoLatin1) else {
             throw MatterCSVError.unreadable
         }
+        let text = decoded
+            .replacingOccurrences(of: "\u{0000}", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw MatterCSVError.empty }
 
         let rows = parseRows(text)
-        guard let header = rows.first else { return [] }
+        guard let header = rows.first else {
+            let fallback = fallbackRecords(from: text)
+            if fallback.isEmpty { throw MatterCSVError.empty }
+            return fallback
+        }
         var columns: [String: Int] = [:]
         for (index, value) in header.enumerated() {
             let key = normalizedHeader(value)
@@ -929,7 +1013,11 @@ private enum MatterCSVParser {
         var missing: [String] = []
         if columns["url"] == nil { missing.append("URL") }
         if columns["in queue"] == nil { missing.append("In Queue") }
-        if !missing.isEmpty { throw MatterCSVError.missingColumns(missing) }
+        if !missing.isEmpty {
+            let fallback = fallbackRecords(from: text)
+            if !fallback.isEmpty { return fallback }
+            throw MatterCSVError.missingColumns(missing)
+        }
 
         let urlIndex = columns["url"]!
         let queueIndex = columns["in queue"]!
@@ -939,11 +1027,12 @@ private enum MatterCSVParser {
         let publisherIndex = columns["publisher"]
         let wordCountIndex = columns["word count"]
 
-        return rows.dropFirst().compactMap { row in
+        let parsed: [MatterImportRecord] = rows.dropFirst().compactMap { (row: [String]) -> MatterImportRecord? in
             guard !row.allSatisfy({ $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
                 return nil
             }
             let url = value(in: row, at: urlIndex)
+            guard !url.isEmpty else { return nil }
             return MatterImportRecord(
                 title: titleIndex.map { value(in: row, at: $0) } ?? "",
                 author: authorIndex.map { value(in: row, at: $0) } ?? "",
@@ -954,6 +1043,12 @@ private enum MatterCSVParser {
                 read: readIndex.map { parseBool(value(in: row, at: $0)) } ?? false
             )
         }
+        if parsed.isEmpty {
+            let fallback = fallbackRecords(from: text)
+            if !fallback.isEmpty { return fallback }
+            throw MatterCSVError.empty
+        }
+        return parsed
     }
 
     private static func value(in row: [String], at index: Int) -> String {
@@ -1031,6 +1126,28 @@ private enum MatterCSVParser {
             rows.append(row)
         }
         return rows
+    }
+
+    private static func fallbackRecords(from text: String) -> [MatterImportRecord] {
+        let pattern = #"https?://[^\s,"']+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let nsText = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+        var seen = Set<String>()
+        return matches.compactMap { match in
+            let raw = nsText.substring(with: match.range).trimmingCharacters(in: CharacterSet(charactersIn: ".,);]}>"))
+            guard !raw.isEmpty, seen.insert(raw).inserted else { return nil }
+            let host = URL(string: raw)?.host?.replacingOccurrences(of: "www.", with: "") ?? raw
+            return MatterImportRecord(
+                title: host,
+                author: "",
+                publisher: host,
+                wordCount: nil,
+                url: raw,
+                inQueue: false,
+                read: false
+            )
+        }
     }
 }
 
@@ -1345,13 +1462,30 @@ final class ReaderStore: ObservableObject {
         }
     }
 
-    func select(_ article: ArticleSummary) async {
+    @discardableResult
+    func select(_ article: ArticleSummary) async -> Article {
+        await prepareArticleForOpen(article)
+    }
+
+    func cachedArticleForOpen(_ article: ArticleSummary) -> Article? {
+        if let selectedArticle,
+           selectedArticle.id == article.id,
+           selectedArticle.isHydratedForReader {
+            return selectedArticle
+        }
+        guard let cached = articleDetails[article.id],
+              cached.isHydratedForReader else {
+            return nil
+        }
+        return cached
+    }
+
+    @discardableResult
+    func prepareArticleForOpen(_ article: ArticleSummary) async -> Article {
         selectedId = article.id
-        if let cached = articleDetails[article.id] {
+        if let cached = cachedArticleForOpen(article) {
             selectedArticle = cached
-            return
-        } else {
-            selectedArticle = Article(summary: article)
+            return cached
         }
 
         do {
@@ -1359,8 +1493,12 @@ final class ReaderStore: ObservableObject {
             articleDetails[article.id] = fetched
             selectedArticle = fetched
             saveCache()
+            return fetched
         } catch {
             errorMessage = error.localizedDescription
+            let fallback = articleDetails[article.id] ?? Article(summary: article)
+            selectedArticle = fallback
+            return fallback
         }
     }
 
@@ -1397,13 +1535,33 @@ final class ReaderStore: ObservableObject {
             errorMessage = nil
             let saved = try await api.save(url: url)
             articleDetails[saved.id] = saved
+            resetProgressForFreshArticle(saved.id)
             await loadArticles()
             selectedId = saved.id
             selectedArticle = saved
+            resetProgressForFreshArticle(saved.id)
             saveCache()
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func isKnownArticle(id: String) -> Bool {
+        articleDetails[id] != nil
+            || inboxArticles.contains(where: { $0.id == id })
+            || archiveArticles.contains(where: { $0.id == id })
+    }
+
+    private func clearProgress(for articleId: String) {
+        readingProgress.removeValue(forKey: articleId)
+        persistedProgress.removeValue(forKey: articleId)
+        transientProgress.removeValue(forKey: articleId)
+    }
+
+    private func resetProgressForFreshArticle(_ articleId: String) {
+        clearProgress(for: articleId)
+        persistSideCache(archived: false, articles: inboxArticles)
+        persistSideCache(archived: true, articles: archiveArticles)
     }
 
     func toggleArchive() async {
@@ -1729,49 +1887,7 @@ final class ReaderStore: ObservableObject {
             loading = true
             defer { loading = false }
 
-            let records = try MatterCSVParser.records(from: data)
-            var result = MatterImportResult(totalRows: records.count)
-
-            for record in records {
-                guard let normalizedURL = record.normalizedURL else {
-                    result.skipped += 1
-                    continue
-                }
-
-                do {
-                    let shouldArchive = !record.inQueue
-                    var imported = try await saveMatterRecord(record, normalizedURL: normalizedURL, shouldArchive: shouldArchive)
-                    var stateUpdateError: Error?
-                    if imported.archived != shouldArchive {
-                        do {
-                            imported = try await api.setArchived(shouldArchive, articleId: imported.id)
-                        } catch {
-                            stateUpdateError = error
-                        }
-                    }
-                    if record.read, imported.readAt == nil {
-                        do {
-                            imported = try await api.setRead(true, articleId: imported.id)
-                        } catch {
-                            stateUpdateError = error
-                        }
-                    }
-                    articleDetails[imported.id] = imported
-                    if shouldArchive {
-                        result.archived += 1
-                    } else {
-                        result.queued += 1
-                    }
-                    if let stateUpdateError {
-                        result.failed += 1
-                        result.lastError = "Imported \(normalizedURL.host ?? normalizedURL.absoluteString), but could not update archive/read state: \(stateUpdateError.localizedDescription)"
-                    }
-                } catch {
-                    result.failed += 1
-                    result.lastError = "\(normalizedURL.absoluteString): \(error.localizedDescription)"
-                }
-            }
-
+            let result = try await api.importMatterCSV(data: data)
             await refreshAll()
             if result.failed > 0, let lastError = result.lastError {
                 errorMessage = "Matter import finished with \(result.failed) failure\(result.failed == 1 ? "" : "s"). Last error: \(lastError)"
@@ -1785,49 +1901,25 @@ final class ReaderStore: ObservableObject {
     }
 
     private func saveMatterRecord(_ record: MatterImportRecord, normalizedURL: URL, shouldArchive: Bool) async throws -> Article {
-        var errors: [String] = []
-
         do {
-            return try await api.save(
-                url: normalizedURL.absoluteString,
-                html: record.fallbackHTML,
-                source: "matter",
-                metadataOnly: true,
-                title: record.title,
-                author: record.author,
-                siteName: record.publisher,
-                description: nil,
-                content: record.fallbackContent,
-                wordCount: record.wordCount,
-                archived: shouldArchive,
-                readAt: record.read
-            )
+            let saved = try await api.save(url: normalizedURL.absoluteString)
+            if isMatterPlaceholder(saved) {
+                try? await api.deleteArticle(id: saved.id)
+                return try await api.save(url: normalizedURL.absoluteString)
+            }
+            return saved
         } catch {
-            errors.append("metadata save: \(error.localizedDescription)")
+            throw ReaderAPIError.server("Could not fetch full article from Matter URL: \(error.localizedDescription)")
         }
+    }
 
-        do {
-            return try await api.save(
-                url: normalizedURL.absoluteString,
-                html: record.fallbackHTML,
-                title: record.title,
-                author: record.author,
-                siteName: record.publisher,
-                description: nil,
-                content: record.fallbackContent,
-                wordCount: record.wordCount
-            )
-        } catch {
-            errors.append("html fallback: \(error.localizedDescription)")
-        }
-
-        do {
-            return try await api.save(url: normalizedURL.absoluteString)
-        } catch {
-            errors.append("source fetch: \(error.localizedDescription)")
-        }
-
-        throw ReaderAPIError.server(errors.joined(separator: " | "))
+    private func isMatterPlaceholder(_ article: Article) -> Bool {
+        let content = article.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return true }
+        let normalized = content.lowercased()
+        return normalized.contains("imported from matter")
+            || normalized.contains("matter export does not always include")
+            || normalized.contains("saved library history export")
     }
 
     private func csvEscape(_ value: String) -> String {
@@ -2443,8 +2535,6 @@ private enum CompactLibraryPane: Hashable {
     case inbox
     case archive
     case settings
-    case search
-    case searchPlaceholder
 }
 
 struct CompactLibraryView: View {
@@ -2466,27 +2556,36 @@ struct CompactLibraryView: View {
     @State private var navigationPath: [ArticleSummary] = []
     @State private var lastArticlePane: CompactLibraryPane = .inbox
     @State private var searchPresented = false
+    @State private var contentScrolled = false
+    @State private var searchFieldFocused = false
+    @State private var searchFocusTask: Task<Void, Never>?
+    @State private var searchDismissTask: Task<Void, Never>?
+    @State private var pendingSearchDismiss = false
+    @State private var tabBarRevealAllowed = true
+    @State private var tabBarRevealTask: Task<Void, Never>?
     @Namespace private var selectionLoupeNamespace
 
     private var isSearching: Bool {
         !store.search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var isSearchActive: Bool {
-        pane == .search || searchPresented || isSearching
-    }
-
     private var searchAvailable: Bool {
         !store.selectionMode && pane != .settings
-    }
-
-    private var showsSearchTab: Bool {
-        pane != .settings && !store.selectionMode
     }
 
     private var resolvedColorScheme: ColorScheme {
         store.theme.isDark ? .dark : .light
     }
+
+    private var tabBarVisibility: Visibility {
+        store.selectionMode || !navigationPath.isEmpty || !tabBarRevealAllowed ? .hidden : .visible
+    }
+
+    private let headerHorizontalPadding: CGFloat = 22
+    private let headerCommandTopPadding: CGFloat = 16
+    private let headerCommandHeight: CGFloat = 44
+    private let compactTitleOpticalOffset: CGFloat = 2
+    private let compactCollapseThreshold: CGFloat = 36
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -2495,7 +2594,7 @@ struct CompactLibraryView: View {
             nativeTabShell
                 .background(store.theme.background.ignoresSafeArea())
 
-            if store.selectionMode && pane != .settings {
+            if navigationPath.isEmpty && store.selectionMode && pane != .settings {
                 bottomBarBackdrop
                 selectionToolbar
                     .padding(.bottom, 12)
@@ -2505,17 +2604,19 @@ struct CompactLibraryView: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: store.selectionMode)
         .environment(\.colorScheme, resolvedColorScheme)
         .preferredColorScheme(resolvedColorScheme)
-        .onChange(of: pane) { _, newPane in
-            guard newPane == .search else { return }
-            activateSearchField()
-        }
-        .onChange(of: searchPresented) { _, presented in
-            guard !presented, pane == .search, !isSearching else { return }
-            returnFromSearch()
-        }
         .onChange(of: store.search) { _, _ in
             searchTask?.cancel()
             store.applyLocalSearch()
+        }
+        .onChange(of: searchPresented) { _, presented in
+            if presented {
+                focusSearchField()
+            } else {
+                searchFieldFocused = false
+            }
+        }
+        .onChange(of: navigationPath.isEmpty) { _, isEmpty in
+            updateTabBarReveal(forListVisible: isEmpty)
         }
         .sheet(item: Binding(get: {
             exportShareURL.map { ShareableURL(url: $0) }
@@ -2539,25 +2640,110 @@ struct CompactLibraryView: View {
     }
 
     private func activateSearchField() {
-        Task { @MainActor in
-            guard pane == .search, !store.selectionMode else { return }
-            await Task.yield()
-            guard pane == .search else { return }
+        guard searchAvailable else { return }
+        pendingSearchDismiss = false
+        searchDismissTask?.cancel()
+        searchDismissTask = nil
+        searchFieldFocused = true
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
             searchPresented = true
+        }
+        focusSearchField()
+    }
+
+    private func focusSearchField() {
+        searchFocusTask?.cancel()
+        searchFocusTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled, searchPresented, !pendingSearchDismiss else { return }
+            searchFieldFocused = true
+            try? await Task.sleep(nanoseconds: 45_000_000)
+            guard !Task.isCancelled, searchPresented, !pendingSearchDismiss else { return }
+            searchFieldFocused = true
         }
     }
 
-    private func dismissSearchField() {
-        Task { @MainActor in
-            await Task.yield()
-            guard pane != .search else { return }
+    private func dismissSearch(clear: Bool = false) {
+        searchFocusTask?.cancel()
+        searchFocusTask = nil
+        searchDismissTask?.cancel()
+        searchDismissTask = nil
+        pendingSearchDismiss = false
+        searchFieldFocused = false
+        forceKeyboardDismiss()
+        if clear {
+            store.search = ""
+        }
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {
             searchPresented = false
         }
     }
 
+    @MainActor
+    private func finishSearchDismiss() {
+        guard pendingSearchDismiss else { return }
+        guard !searchFieldFocused else { return }
+        pendingSearchDismiss = false
+        searchDismissTask?.cancel()
+        searchDismissTask = nil
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+            searchPresented = false
+        }
+    }
+
+    private func handleSearchFieldDidEndEditing() {
+        guard pendingSearchDismiss else { return }
+        searchDismissTask?.cancel()
+        finishSearchDismiss()
+    }
+
+    @MainActor
+    private func forceKeyboardDismiss() {
+        #if os(iOS)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
+    }
+
+    private func prepareForArticleOpen() {
+        searchFieldFocused = false
+        tabBarRevealTask?.cancel()
+        tabBarRevealTask = nil
+        tabBarRevealAllowed = false
+    }
+
+    private func openArticle(_ article: ArticleSummary) {
+        prepareForArticleOpen()
+        Task { @MainActor in
+            await store.prepareArticleForOpen(article)
+            if let onArticleTap {
+                onArticleTap(article)
+            } else if navigationPath.last?.id != article.id {
+                navigationPath.append(article)
+            }
+        }
+    }
+
     private func clearSearchIfNeeded(leavingSearch oldPane: CompactLibraryPane, entering newPane: CompactLibraryPane) {
-        guard newPane == .settings || oldPane == .search else { return }
+        guard newPane == .settings else { return }
         store.search = ""
+    }
+
+    private func updateTabBarReveal(forListVisible listVisible: Bool) {
+        tabBarRevealTask?.cancel()
+        tabBarRevealTask = nil
+
+        guard listVisible else {
+            tabBarRevealAllowed = false
+            return
+        }
+
+        tabBarRevealTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
+                tabBarRevealAllowed = true
+            }
+        }
     }
 
     private func refreshForSelectedLibraryPane(_ selectedPane: CompactLibraryPane) {
@@ -2573,25 +2759,6 @@ struct CompactLibraryView: View {
         case .settings:
             store.selectionMode = false
             store.selectedIds.removeAll()
-        case .search, .searchPlaceholder:
-            break
-        }
-    }
-
-    private func returnFromSearch() {
-        navigationPath.removeAll()
-        searchPresented = false
-        store.search = ""
-        switch lastArticlePane {
-        case .inbox:
-            store.setArchiveMode(false)
-        case .archive:
-            store.setArchiveMode(true)
-        case .settings, .search, .searchPlaceholder:
-            break
-        }
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
-            pane = lastArticlePane
         }
     }
 
@@ -2602,37 +2769,20 @@ struct CompactLibraryView: View {
     private func prepareForPaneSelection(_ selectedPane: CompactLibraryPane) -> CompactLibraryPane {
         let oldPane = pane
         navigationPath.removeAll()
-        if selectedPane == .search, pane == .inbox || pane == .archive {
-            lastArticlePane = pane
-        }
         return oldPane
     }
 
     private func finishPaneSelection(from oldPane: CompactLibraryPane, to selectedPane: CompactLibraryPane) {
-        if selectedPane == .search {
-            activateSearchField()
-            return
+        dismissSearch(clear: false)
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+            contentScrolled = false
         }
-
-        dismissSearchField()
         clearSearchIfNeeded(leavingSearch: oldPane, entering: selectedPane)
         refreshForSelectedLibraryPane(selectedPane)
     }
 
     private func updatePaneSelection(_ selectedPane: CompactLibraryPane) {
-        guard selectedPane != .searchPlaceholder else {
-            return
-        }
-        guard !(selectedPane == .search && !showsSearchTab) else {
-            return
-        }
-
-        if pane == selectedPane {
-            if selectedPane == .search {
-                activateSearchField()
-            }
-            return
-        }
+        guard pane != selectedPane else { return }
 
         let oldPane = prepareForPaneSelection(selectedPane)
         animatePaneSelection(selectedPane)
@@ -2642,7 +2792,7 @@ struct CompactLibraryView: View {
     @ViewBuilder
     private var nativeTabShell: some View {
         if #available(iOS 18.0, *) {
-            let shell = TabView(selection: Binding(get: { pane }, set: { updatePaneSelection($0) })) {
+            TabView(selection: Binding(get: { pane }, set: { updatePaneSelection($0) })) {
                 Tab("Inbox", systemImage: "tray", value: CompactLibraryPane.inbox) {
                     navigationPane(.inbox)
                 }
@@ -2652,29 +2802,8 @@ struct CompactLibraryView: View {
                 Tab("Settings", systemImage: "gearshape", value: CompactLibraryPane.settings) {
                     navigationPane(.settings)
                 }
-                if showsSearchTab {
-                    Tab(value: CompactLibraryPane.search, role: .search) {
-                        searchPane
-                    } label: {
-                        Label("Search", systemImage: "magnifyingglass")
-                    }
-                } else {
-                    Tab(value: CompactLibraryPane.searchPlaceholder) {
-                        Color.clear
-                    } label: {
-                        Label("Search", systemImage: "magnifyingglass")
-                            .opacity(0)
-                            .accessibilityHidden(true)
-                    }
-                }
             }
-            .toolbar(store.selectionMode ? .hidden : .visible, for: .tabBar)
-            .readerNativeSearchable(active: searchAvailable, text: $store.search, isPresented: $searchPresented)
-            if #available(iOS 26.0, *) {
-                shell.tabViewSearchActivation(.searchTabSelection)
-            } else {
-                shell
-            }
+            .toolbar(tabBarVisibility, for: .tabBar)
         } else {
             TabView(selection: Binding(get: { pane }, set: { updatePaneSelection($0) })) {
                 navigationPane(.inbox)
@@ -2686,54 +2815,83 @@ struct CompactLibraryView: View {
                 navigationPane(.settings)
                     .tabItem { Label("Settings", systemImage: "gearshape") }
                     .tag(CompactLibraryPane.settings)
-                if showsSearchTab {
-                    searchPane
-                        .tabItem {
-                            Label("Search", systemImage: "magnifyingglass")
-                        }
-                        .tag(CompactLibraryPane.search)
-                } else {
-                    Color.clear
-                        .tabItem {
-                            Label("Search", systemImage: "magnifyingglass")
-                                .opacity(0)
-                                .accessibilityHidden(true)
-                        }
-                        .tag(CompactLibraryPane.searchPlaceholder)
-                }
             }
-            .toolbar(store.selectionMode ? .hidden : .visible, for: .tabBar)
-            .readerNativeSearchable(active: searchAvailable, text: $store.search, isPresented: $searchPresented)
+            .toolbar(tabBarVisibility, for: .tabBar)
         }
-    }
-
-    private var searchPane: some View {
-        navigationPane(.search)
-            .onAppear {
-                activateSearchField()
-            }
     }
 
     @ViewBuilder
     private func paneContent(_ contentPane: CompactLibraryPane) -> some View {
-        VStack(spacing: 0) {
-            headerBar(for: contentPane)
+        ZStack(alignment: .top) {
             if contentPane == .settings {
-                LibrarySettingsPane(store: store, exportShareURL: $exportShareURL)
+                LibrarySettingsPane(
+                    store: store,
+                    exportShareURL: $exportShareURL,
+                    onScrolledChange: updateContentScrolled
+                )
             } else {
-                articleList
+                articleList(for: contentPane)
             }
+
+            if searchPresented && contentPane != .settings {
+                headerBar(for: contentPane)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .zIndex(3)
+            }
+
+            if contentPane != .settings && !store.selectionMode && !searchPresented {
+                listBottomFade
+                    .zIndex(2)
+            }
+
+            if contentScrolled && !searchPresented {
+                compactTopChrome(for: contentPane)
+                    .transition(.opacity)
+                    .zIndex(4)
+            }
+
+            headerCommandOverlay(for: contentPane)
+                .zIndex(5)
         }
+        .animation(.spring(response: 0.30, dampingFraction: 0.9), value: contentScrolled)
+        .animation(.spring(response: 0.30, dampingFraction: 0.9), value: searchPresented)
         .background(store.theme.background.ignoresSafeArea())
         .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
         .safeAreaInset(edge: .bottom) {
             Color.clear
-                .frame(height: store.selectionMode ? 112 : 136)
+                .frame(height: store.selectionMode ? 112 : 0)
         }
     }
 
     private func selectPane(_ newPane: CompactLibraryPane) {
         updatePaneSelection(newPane)
+    }
+
+    private func updateContentScrolled(_ scrolled: Bool) {
+        guard contentScrolled != scrolled else { return }
+        withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+            contentScrolled = scrolled
+        }
+    }
+
+    @ViewBuilder
+    private var listBottomFade: some View {
+        GeometryReader { _ in
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: store.theme.background.opacity(0.56), location: 0.58),
+                        .init(color: store.theme.background, location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 74)
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -2759,7 +2917,62 @@ struct CompactLibraryView: View {
     }
 
     @ViewBuilder
+    private var topBarBackdrop: some View {
+        VStack(spacing: 0) {
+            LinearGradient(
+                stops: [
+                    .init(color: store.theme.background, location: 0),
+                    .init(color: store.theme.background, location: 0.46),
+                    .init(color: store.theme.background.opacity(0.94), location: 0.68),
+                    .init(color: store.theme.background.opacity(0.68), location: 0.86),
+                    .init(color: .clear, location: 1),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 178)
+            Spacer(minLength: 0)
+        }
+        .ignoresSafeArea(edges: .top)
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private func compactTopChrome(for contentPane: CompactLibraryPane) -> some View {
+        ZStack(alignment: .top) {
+            topBarBackdrop
+            ZStack {
+                Text(headerTitle(for: contentPane))
+                    .font(.system(.title3, design: .default, weight: .bold))
+                    .foregroundStyle(store.theme.primary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity)
+            }
+            .frame(height: headerCommandHeight)
+            .padding(.horizontal, headerHorizontalPadding)
+            .padding(.top, headerCommandTopPadding)
+            .offset(y: compactTitleOpticalOffset)
+        }
+        .frame(height: 178)
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
     private func headerBar(for contentPane: CompactLibraryPane) -> some View {
+        Group {
+            if searchPresented && contentPane != .settings {
+                searchHeader
+            } else {
+                listHeaderBar(for: contentPane)
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 16)
+        .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private func listHeaderBar(for contentPane: CompactLibraryPane) -> some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(headerTitle(for: contentPane))
@@ -2775,34 +2988,103 @@ struct CompactLibraryView: View {
                     .font(.system(.body, weight: .semibold))
                     .foregroundStyle(store.theme.primary)
             } else if contentPane != .settings {
-                Menu {
-                    Button {
-                        store.enterSelectionMode()
-                    } label: {
-                        Label("Select", systemImage: "checkmark.circle")
-                    }
-                    Button {
-                        showingAdd = true
-                    } label: {
-                        Label("Add article", systemImage: "plus")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .font(.title2)
-                        .foregroundStyle(store.theme.primary)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .environment(\.colorScheme, resolvedColorScheme)
-                .preferredColorScheme(resolvedColorScheme)
+                Color.clear
+                    .frame(width: 92, height: 44)
             } else {
                 Color.clear
-                    .frame(width: 44, height: 44)
+                    .frame(width: 1, height: 44)
             }
         }
-        .padding(.horizontal, 22)
-        .padding(.top, 22)
-        .padding(.bottom, 2)
+    }
+
+    @ViewBuilder
+    private var searchHeader: some View {
+        HStack(spacing: 10) {
+            #if os(iOS)
+            NativeSearchField(
+                text: $store.search,
+                theme: store.theme,
+                isFirstResponder: $searchFieldFocused,
+                onDidEndEditing: handleSearchFieldDidEndEditing
+            )
+            .frame(height: 42)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .readerGlassBarBackground(theme: store.theme)
+            #else
+            TextField("Search", text: $store.search)
+                .textFieldStyle(.roundedBorder)
+                .frame(height: 42)
+            #endif
+
+            Button {
+                dismissSearch(clear: true)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .bold))
+                    .frame(width: 42, height: 42)
+                    .contentShape(Circle())
+                    .accessibilityLabel("Cancel search")
+            }
+            .foregroundStyle(store.theme.primary)
+            .readerStableGlassCircle(theme: store.theme)
+        }
+    }
+
+    @ViewBuilder
+    private func headerCommandOverlay(for contentPane: CompactLibraryPane) -> some View {
+        if contentPane != .settings && !store.selectionMode && !searchPresented {
+            HStack {
+                Spacer(minLength: 0)
+                headerCommandGroup
+            }
+            .padding(.horizontal, headerHorizontalPadding)
+            .padding(.top, headerCommandTopPadding)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+    }
+
+    @ViewBuilder
+    private var headerCommandGroup: some View {
+        HStack(spacing: 2) {
+            Button {
+                activateSearchField()
+            } label: {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 36, height: 36)
+                    .contentShape(Circle())
+                    .accessibilityLabel("Search")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(searchPresented || isSearching ? Color.accentColor : store.theme.primary)
+            .readerGlassPressAnimation()
+
+            Menu {
+                Button {
+                    store.enterSelectionMode()
+                } label: {
+                    Label("Select", systemImage: "checkmark.circle")
+                }
+                Button {
+                    showingAdd = true
+                } label: {
+                    Label("Add article", systemImage: "plus")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 18, weight: .bold))
+                    .frame(width: 36, height: 36)
+                    .contentShape(Circle())
+                    .accessibilityLabel("More")
+            }
+            .foregroundStyle(store.theme.primary)
+            .environment(\.colorScheme, resolvedColorScheme)
+            .preferredColorScheme(resolvedColorScheme)
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 4)
+        .readerGlassBarBackground(theme: store.theme)
     }
 
     private func headerTitle(for contentPane: CompactLibraryPane) -> String {
@@ -2812,7 +3094,7 @@ struct CompactLibraryView: View {
         if contentPane == .settings {
             return "Settings"
         }
-        if contentPane == .search || isSearching {
+        if isSearching {
             return "Search"
         }
         return store.archived ? "Archive" : "Inbox"
@@ -2822,15 +3104,68 @@ struct CompactLibraryView: View {
         if contentPane == .settings {
             return "Reading and exports"
         }
-        if contentPane == .search || isSearching {
+        if isSearching {
             return "\(store.articles.count) result\(store.articles.count == 1 ? "" : "s")"
         }
         return "\(store.articles.count) article\(store.articles.count == 1 ? "" : "s")"
     }
 
     @ViewBuilder
-    private var articleList: some View {
+    private func articleList(for contentPane: CompactLibraryPane) -> some View {
+        #if os(iOS)
+        NativeArticleTable(
+            articles: store.articles,
+            showHeader: true,
+            header: AnyView(
+                listHeaderBar(for: contentPane)
+                    .padding(.horizontal, 22)
+                    .padding(.top, 16)
+                    .padding(.bottom, 8)
+                    .padding(.bottom, 24)
+            ),
+            headerHidden: searchPresented,
+            selectedIds: store.selectedIds,
+            selectionMode: store.selectionMode,
+            theme: store.theme,
+            isSearching: isSearching,
+            progress: { store.progress(for: $0) },
+            onTap: { article in
+                openArticle(article)
+            },
+            onToggleSelection: { store.toggleSelection($0) },
+            onEnterSelection: { store.enterSelectionMode(initial: $0) },
+            onArchive: { article in
+                Task {
+                    if article.archived {
+                        await store.unarchive(article)
+                    } else {
+                        await store.archive(article)
+                    }
+                }
+            },
+            onToggleRead: { article in
+                Task { await store.toggleRead(article) }
+            },
+            onDelete: { article in
+                Task { await store.delete(article) }
+            },
+            onShare: { article in
+                exportShareURL = store.articleURL(for: article)
+            },
+            onScrolledChange: updateContentScrolled
+        )
+        #else
         List {
+            listHeaderBar(for: contentPane)
+                .opacity(searchPresented ? 0 : 1)
+                .padding(.horizontal, 22)
+                .padding(.top, 16)
+                .padding(.bottom, 32)
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+                .allowsHitTesting(false)
+
             ForEach(store.articles) { article in
                 articleRow(for: article)
             }
@@ -2838,11 +3173,15 @@ struct CompactLibraryView: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(Color.clear)
-        .environment(\.defaultMinListRowHeight, 70)
-        .listRowSpacing(0)
-        .contentMargins(.top, 16, for: .scrollContent)
+        .environment(\.defaultMinListRowHeight, 76)
+        .listRowSpacing(6)
+        .contentMargins(.top, 0, for: .scrollContent)
+        .contentMargins(.bottom, 12, for: .scrollContent)
+        .contentMargins(.bottom, 0, for: .scrollIndicators)
         .contentMargins(.horizontal, 0, for: .scrollContent)
         .scrollDismissesKeyboard(.interactively)
+        .readerPaneScrollObserver(threshold: compactCollapseThreshold, updateContentScrolled)
+        #endif
     }
 
     @ViewBuilder
@@ -2863,28 +3202,25 @@ struct CompactLibraryView: View {
                     .onTapGesture {
                         store.toggleSelection(article.id)
                     }
-            } else if let onArticleTap {
+            } else if onArticleTap != nil {
                 row
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        searchPresented = false
-                        onArticleTap(article)
+                        openArticle(article)
                     }
             } else {
                 row
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        searchPresented = false
-                        navigationPath.append(article)
+                        openArticle(article)
                     }
                     .accessibilityAddTraits(.isButton)
                     .accessibilityAction {
-                        searchPresented = false
-                        navigationPath.append(article)
+                        openArticle(article)
                     }
             }
         }
-        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+        .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
         .contextMenu {
@@ -3052,6 +3388,306 @@ private struct ShareableURL: Identifiable {
     var id: URL { url }
 }
 
+#if os(iOS)
+struct NativeArticleTable: UIViewControllerRepresentable {
+    let articles: [ArticleSummary]
+    let showHeader: Bool
+    let header: AnyView
+    let headerHidden: Bool
+    let selectedIds: Set<String>
+    let selectionMode: Bool
+    let theme: ReaderTheme
+    let isSearching: Bool
+    let progress: (String) -> Double
+    let onTap: (ArticleSummary) -> Void
+    let onToggleSelection: (String) -> Void
+    let onEnterSelection: (String) -> Void
+    let onArchive: (ArticleSummary) -> Void
+    let onToggleRead: (ArticleSummary) -> Void
+    let onDelete: (ArticleSummary) -> Void
+    let onShare: (ArticleSummary) -> Void
+    let onScrolledChange: (Bool) -> Void
+
+    func makeUIViewController(context: Context) -> Controller {
+        let controller = Controller()
+        controller.update(with: self)
+        return controller
+    }
+
+    func updateUIViewController(_ controller: Controller, context: Context) {
+        controller.update(with: self)
+    }
+
+    private var reloadSignature: String {
+        let articleSignature = articles.map { article in
+            [
+                article.id,
+                article.title,
+                article.archived ? "1" : "0",
+                article.readAt == nil ? "0" : "1",
+                "\(Int((progress(article.id) * 1000).rounded()))"
+            ].joined(separator: ":")
+        }
+        .joined(separator: "|")
+
+        return [
+            articleSignature,
+            showHeader ? "header" : "no-header",
+            selectedIds.sorted().joined(separator: ","),
+            selectionMode ? "selecting" : "reading",
+            theme.rawValue,
+            isSearching ? "search" : "normal"
+        ].joined(separator: "#")
+    }
+
+    final class Controller: UIViewController, UITableViewDataSource, UITableViewDelegate {
+        private let tableView = UITableView(frame: .zero, style: .plain)
+        private var model: NativeArticleTable?
+        private var lastReloadSignature: String?
+        private var lastHeaderHidden: Bool?
+        private var lastScrolledState = false
+        private let collapseThreshold: CGFloat = 36
+
+        override func viewDidLoad() {
+            super.viewDidLoad()
+
+            view.backgroundColor = .clear
+            tableView.translatesAutoresizingMaskIntoConstraints = false
+            tableView.backgroundColor = .clear
+            tableView.separatorStyle = .none
+            tableView.rowHeight = UITableView.automaticDimension
+            tableView.estimatedRowHeight = 82
+            tableView.keyboardDismissMode = .interactive
+            tableView.contentInsetAdjustmentBehavior = .never
+            tableView.showsVerticalScrollIndicator = true
+            tableView.dataSource = self
+            tableView.delegate = self
+            tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+            tableView.register(UITableViewCell.self, forCellReuseIdentifier: "header")
+
+            view.addSubview(tableView)
+            NSLayoutConstraint.activate([
+                tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                tableView.topAnchor.constraint(equalTo: view.topAnchor),
+                tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            ])
+        }
+
+        func update(with model: NativeArticleTable) {
+            self.model = model
+            view.backgroundColor = UIColor(model.theme.background)
+            tableView.backgroundColor = .clear
+            tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 12, right: 0)
+            tableView.verticalScrollIndicatorInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+
+            let signature = model.reloadSignature
+            let headerVisibilityChanged = lastHeaderHidden != model.headerHidden
+            lastHeaderHidden = model.headerHidden
+            guard signature != lastReloadSignature else {
+                if headerVisibilityChanged {
+                    updateVisibleHeaderCell(with: model)
+                }
+                return
+            }
+            lastReloadSignature = signature
+            UIView.performWithoutAnimation {
+                tableView.reloadData()
+                tableView.layoutIfNeeded()
+            }
+        }
+
+        func numberOfSections(in tableView: UITableView) -> Int {
+            1
+        }
+
+        func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+            guard let model else { return 0 }
+            return model.articles.count + (model.showHeader ? 1 : 0)
+        }
+
+        func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+            guard let model else { return UITableViewCell() }
+
+            if model.showHeader && indexPath.row == 0 {
+                let cell = tableView.dequeueReusableCell(withIdentifier: "header", for: indexPath)
+                configureHeaderCell(cell, with: model)
+                return cell
+            }
+
+            let article = article(at: indexPath, in: model)
+            let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
+            configureBaseCell(cell)
+            resetSwipeState(for: cell)
+            cell.contentConfiguration = UIHostingConfiguration {
+                ArticleRow(
+                    article: article,
+                    selected: model.selectionMode && model.selectedIds.contains(article.id),
+                    theme: model.theme,
+                    progress: model.progress(article.id),
+                    showsModeBadge: model.isSearching,
+                    selecting: model.selectionMode
+                )
+                .background(Color.clear)
+            }
+            .margins(.all, 0)
+            return cell
+        }
+
+        private func configureBaseCell(_ cell: UITableViewCell) {
+            cell.backgroundColor = .clear
+            cell.contentView.backgroundColor = .clear
+            cell.selectedBackgroundView = UIView()
+            cell.selectionStyle = .none
+            cell.preservesSuperviewLayoutMargins = false
+            cell.layoutMargins = .zero
+            cell.separatorInset = .zero
+            cell.clipsToBounds = false
+            cell.contentView.clipsToBounds = false
+        }
+
+        private func configureHeaderCell(_ cell: UITableViewCell, with model: NativeArticleTable) {
+            configureBaseCell(cell)
+            cell.contentConfiguration = UIHostingConfiguration {
+                model.header
+                    .opacity(model.headerHidden ? 0 : 1)
+                    .animation(nil, value: model.headerHidden)
+                    .background(Color.clear)
+            }
+            .margins(.all, 0)
+        }
+
+        private func updateVisibleHeaderCell(with model: NativeArticleTable) {
+            guard model.showHeader else { return }
+            let headerIndexPath = IndexPath(row: 0, section: 0)
+            guard let cell = tableView.cellForRow(at: headerIndexPath) else { return }
+            UIView.performWithoutAnimation {
+                configureHeaderCell(cell, with: model)
+                cell.layoutIfNeeded()
+                tableView.layoutIfNeeded()
+            }
+        }
+
+        private func resetSwipeState(for cell: UITableViewCell) {
+            cell.transform = .identity
+            cell.contentView.transform = .identity
+            cell.layer.masksToBounds = false
+            cell.contentView.layer.masksToBounds = false
+            cell.subviews.forEach { subview in
+                subview.clipsToBounds = false
+                subview.layer.masksToBounds = false
+            }
+        }
+
+        func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+            guard let model, isArticleRow(indexPath, in: model) else { return }
+            let article = article(at: indexPath, in: model)
+            if model.selectionMode {
+                model.onToggleSelection(article.id)
+            } else {
+                model.onTap(article)
+            }
+        }
+
+        func tableView(_ tableView: UITableView, leadingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
+            guard let model, isArticleRow(indexPath, in: model) else { return nil }
+            let article = article(at: indexPath, in: model)
+
+            let archive = UIContextualAction(style: .normal, title: article.archived ? "Unarchive" : "Archive") { _, _, completion in
+                model.onArchive(article)
+                completion(true)
+            }
+            archive.image = UIImage(systemName: article.archived ? "tray.and.arrow.up" : "archivebox")
+            archive.backgroundColor = .systemIndigo
+
+            let read = UIContextualAction(style: .normal, title: article.readAt == nil ? "Read" : "Unread") { _, _, completion in
+                model.onToggleRead(article)
+                completion(true)
+            }
+            read.image = UIImage(systemName: article.readAt == nil ? "checkmark.circle" : "circle")
+            read.backgroundColor = .systemGreen
+
+            let configuration = UISwipeActionsConfiguration(actions: [archive, read])
+            configuration.performsFirstActionWithFullSwipe = true
+            return configuration
+        }
+
+        func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
+            guard let model, isArticleRow(indexPath, in: model) else { return nil }
+            let article = article(at: indexPath, in: model)
+
+            let delete = UIContextualAction(style: .destructive, title: "Delete") { _, _, completion in
+                model.onDelete(article)
+                completion(true)
+            }
+            delete.image = UIImage(systemName: "trash")
+            delete.backgroundColor = .systemRed
+
+            let configuration = UISwipeActionsConfiguration(actions: [delete])
+            configuration.performsFirstActionWithFullSwipe = true
+            return configuration
+        }
+
+        func tableView(_ tableView: UITableView, didEndEditingRowAt indexPath: IndexPath?) {
+            UIView.performWithoutAnimation {
+                tableView.visibleCells.forEach(resetSwipeState(for:))
+                tableView.layoutIfNeeded()
+            }
+        }
+
+        func tableView(
+            _ tableView: UITableView,
+            contextMenuConfigurationForRowAt indexPath: IndexPath,
+            point: CGPoint
+        ) -> UIContextMenuConfiguration? {
+            guard let model, isArticleRow(indexPath, in: model) else { return nil }
+            let article = article(at: indexPath, in: model)
+
+            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
+                let select = UIAction(title: "Select", image: UIImage(systemName: "checkmark.circle")) { _ in
+                    model.onEnterSelection(article.id)
+                }
+                let read = UIAction(
+                    title: article.readAt == nil ? "Mark as Read" : "Mark as Unread",
+                    image: UIImage(systemName: article.readAt == nil ? "checkmark.circle" : "circle")
+                ) { _ in
+                    model.onToggleRead(article)
+                }
+                let archive = UIAction(
+                    title: article.archived ? "Unarchive" : "Archive",
+                    image: UIImage(systemName: article.archived ? "tray.and.arrow.up" : "archivebox")
+                ) { _ in
+                    model.onArchive(article)
+                }
+                let share = UIAction(title: "Share", image: UIImage(systemName: "square.and.arrow.up")) { _ in
+                    model.onShare(article)
+                }
+                let delete = UIAction(title: "Delete", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
+                    model.onDelete(article)
+                }
+                return UIMenu(children: [select, read, archive, share, delete])
+            }
+        }
+
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            guard let model else { return }
+            let scrolled = scrollView.contentOffset.y > collapseThreshold
+            guard scrolled != lastScrolledState else { return }
+            lastScrolledState = scrolled
+            model.onScrolledChange(scrolled)
+        }
+
+        private func isArticleRow(_ indexPath: IndexPath, in model: NativeArticleTable) -> Bool {
+            indexPath.row >= (model.showHeader ? 1 : 0)
+        }
+
+        private func article(at indexPath: IndexPath, in model: NativeArticleTable) -> ArticleSummary {
+            model.articles[indexPath.row - (model.showHeader ? 1 : 0)]
+        }
+    }
+}
+#endif
+
 struct ActivityShareSheet: UIViewControllerRepresentable {
     @Environment(\.dismiss) private var dismiss
     let activityItems: [Any]
@@ -3114,6 +3750,7 @@ struct ActivityShareSheet: UIViewControllerRepresentable {
 struct LibrarySettingsPane: View {
     @ObservedObject var store: ReaderStore
     @Binding var exportShareURL: URL?
+    var onScrolledChange: (Bool) -> Void = { _ in }
     @State private var showingMatterImporter = false
     @State private var importingMatter = false
     @State private var matterImportMessage: String?
@@ -3124,6 +3761,13 @@ struct LibrarySettingsPane: View {
 
     var body: some View {
         Form {
+            Section {
+                settingsHeader
+            }
+            .listRowInsets(EdgeInsets(top: 0, leading: 22, bottom: 0, trailing: 22))
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+
             Section("Appearance") {
                 SettingsMenuRow(title: "Theme", value: store.themePreference.label, theme: store.theme) {
                     ForEach(ReaderTheme.displayOrder) { theme in
@@ -3233,10 +3877,14 @@ struct LibrarySettingsPane: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+        .contentMargins(.top, 0, for: .scrollContent)
+        .contentMargins(.bottom, 12, for: .scrollContent)
+        .contentMargins(.bottom, 0, for: .scrollIndicators)
         .background(store.theme.background)
         .foregroundStyle(store.theme.primary)
         .tint(store.theme.primary)
         .listSectionSeparatorTint(store.theme.hairline)
+        .readerPaneScrollObserver(onScrolledChange)
         .environment(\.colorScheme, resolvedColorScheme)
         .preferredColorScheme(resolvedColorScheme)
         .fileImporter(
@@ -3273,14 +3921,35 @@ struct LibrarySettingsPane: View {
             }
         }
     }
+
+    private var settingsHeader: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Settings")
+                .font(.system(.largeTitle, design: .default, weight: .bold))
+                .foregroundStyle(store.theme.primary)
+            Text("Reading and exports")
+                .font(.title3)
+                .foregroundStyle(store.theme.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 16)
+        .padding(.bottom, 24)
+    }
 }
 
 struct NativeSearchField: UIViewRepresentable {
     @Binding var text: String
     let theme: ReaderTheme
-    @FocusState.Binding var isFirstResponder: Bool
+    @Binding var isFirstResponder: Bool
+    var onDidEndEditing: (() -> Void)? = nil
 
-    func makeCoordinator() -> Coordinator { Coordinator(text: $text, isFirstResponder: $isFirstResponder) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            text: $text,
+            isFirstResponder: $isFirstResponder,
+            onDidEndEditing: onDidEndEditing
+        )
+    }
 
     func makeUIView(context: Context) -> UISearchBar {
         let searchBar = UISearchBar(frame: .zero)
@@ -3295,6 +3964,9 @@ struct NativeSearchField: UIViewRepresentable {
         searchBar.isTranslucent = true
         searchBar.setShowsCancelButton(false, animated: false)
         applyTheme(to: searchBar)
+        DispatchQueue.main.async {
+            context.coordinator.applyFocusState(to: searchBar)
+        }
         return searchBar
     }
 
@@ -3306,11 +3978,8 @@ struct NativeSearchField: UIViewRepresentable {
         if searchBar.showsCancelButton {
             searchBar.setShowsCancelButton(false, animated: false)
         }
-        if isFirstResponder, !searchBar.searchTextField.isFirstResponder {
-            searchBar.searchTextField.becomeFirstResponder()
-        } else if !isFirstResponder, searchBar.searchTextField.isFirstResponder {
-            searchBar.searchTextField.resignFirstResponder()
-        }
+        context.coordinator.onDidEndEditing = onDidEndEditing
+        context.coordinator.applyFocusState(to: searchBar)
     }
 
     private func applyTheme(to searchBar: UISearchBar) {
@@ -3357,11 +4026,50 @@ struct NativeSearchField: UIViewRepresentable {
 
     final class Coordinator: NSObject, UISearchBarDelegate {
         var text: Binding<String>
-        var isFirstResponder: FocusState<Bool>.Binding
+        var isFirstResponder: Binding<Bool>
+        var onDidEndEditing: (() -> Void)?
+        private var focusToken = 0
 
-        init(text: Binding<String>, isFirstResponder: FocusState<Bool>.Binding) {
+        init(
+            text: Binding<String>,
+            isFirstResponder: Binding<Bool>,
+            onDidEndEditing: (() -> Void)?
+        ) {
             self.text = text
             self.isFirstResponder = isFirstResponder
+            self.onDidEndEditing = onDidEndEditing
+        }
+
+        func applyFocusState(to searchBar: UISearchBar) {
+            if isFirstResponder.wrappedValue {
+                guard !searchBar.searchTextField.isFirstResponder else { return }
+                focusToken += 1
+                requestFocus(on: searchBar, token: focusToken, remainingAttempts: 8)
+            } else if searchBar.searchTextField.isFirstResponder {
+                focusToken += 1
+                searchBar.searchTextField.resignFirstResponder()
+            }
+        }
+
+        private func requestFocus(on searchBar: UISearchBar, token: Int, remainingAttempts: Int) {
+            DispatchQueue.main.async { [weak self, weak searchBar] in
+                guard let self, let searchBar else { return }
+                guard token == self.focusToken, self.isFirstResponder.wrappedValue else { return }
+
+                if searchBar.window != nil {
+                    searchBar.searchTextField.becomeFirstResponder()
+                    if searchBar.searchTextField.isFirstResponder || remainingAttempts <= 0 {
+                        return
+                    }
+                } else if remainingAttempts <= 0 {
+                    return
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.035) { [weak self, weak searchBar] in
+                    guard let self, let searchBar else { return }
+                    self.requestFocus(on: searchBar, token: token, remainingAttempts: remainingAttempts - 1)
+                }
+            }
         }
 
         func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
@@ -3370,7 +4078,7 @@ struct NativeSearchField: UIViewRepresentable {
 
         func searchBarSearchButtonClicked(_ searchBar: UISearchBar) {
             isFirstResponder.wrappedValue = false
-            searchBar.resignFirstResponder()
+            searchBar.searchTextField.resignFirstResponder()
         }
 
         func searchBarCancelButtonClicked(_ searchBar: UISearchBar) {
@@ -3386,7 +4094,12 @@ struct NativeSearchField: UIViewRepresentable {
         }
 
         func searchBarTextDidEndEditing(_ searchBar: UISearchBar) {
-            isFirstResponder.wrappedValue = false
+            // Do not mirror transient UIKit end-editing callbacks into SwiftUI.
+            // The field can briefly lose first responder during body updates; if
+            // we write false here, the next update keeps the keyboard dismissed.
+            if !isFirstResponder.wrappedValue {
+                onDidEndEditing?()
+            }
         }
 
         func searchBarShouldEndEditing(_ searchBar: UISearchBar) -> Bool {
@@ -3513,6 +4226,7 @@ struct PadLibraryView: View {
                         store.selectedArticle = nil
                         store.selectedId = nil
                     }
+                    .id(article.id)
                 } else {
                     ContentUnavailableView("Select an article", systemImage: "doc.text")
                         .foregroundStyle(store.theme.secondary)
@@ -3530,6 +4244,7 @@ struct CompactReaderDestination: View {
     @Environment(\.dismiss) private var dismiss
     @State private var article: Article?
     @State private var chromeVisible = true
+    @GestureState private var edgeBackSwipeActive = false
 
     var body: some View {
         ZStack {
@@ -3538,7 +4253,7 @@ struct CompactReaderDestination: View {
             if let article {
                 ReaderDetailView(article: article, store: store, onChromeVisibilityChange: { visible in
                     chromeVisible = visible
-                }) {
+                }, scrollDisabled: edgeBackSwipeActive) {
                     let targetArchived = !(store.selectedArticle?.archived ?? article.archived)
                     let articleSummary = store.summary(for: store.selectedArticle ?? article)
                     dismiss()
@@ -3549,6 +4264,7 @@ struct CompactReaderDestination: View {
                 } onDelete: {
                     dismiss()
                 }
+                .id(article.id)
             } else {
                 ProgressView()
             }
@@ -3576,7 +4292,13 @@ struct CompactReaderDestination: View {
             }
             .frame(width: 110, height: 168, alignment: .topLeading)
         }
-        .contentShape(Rectangle())
+        .overlay(alignment: .leading) {
+            Color.clear
+                .frame(width: 34)
+                .contentShape(Rectangle())
+                .highPriorityGesture(edgeBackGesture)
+                .ignoresSafeArea(edges: .vertical)
+        }
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
         .toolbarBackground(store.theme.background, for: .navigationBar)
@@ -3584,9 +4306,7 @@ struct CompactReaderDestination: View {
         .ignoresSafeArea(.container, edges: .top)
         .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
         .preferredColorScheme(store.theme.isDark ? .dark : .light)
-        .readerSystemChromeHidden(!chromeVisible)
         .background(NavigationGestureConfigurator().frame(width: 0, height: 0))
-        .simultaneousGesture(edgeBackGesture)
         .onAppear {
             postChromeVisibility(chromeVisible)
         }
@@ -3597,10 +4317,10 @@ struct CompactReaderDestination: View {
             postChromeVisibility(visible)
         }
         .task(id: summary.id) {
-            article = store.selectedArticle?.id == summary.id ? store.selectedArticle : Article(summary: summary)
-            await store.select(summary)
-            if store.selectedArticle?.id == summary.id {
-                article = store.selectedArticle
+            if let cached = store.cachedArticleForOpen(summary) {
+                article = cached
+            } else {
+                article = await store.prepareArticleForOpen(summary)
             }
         }
     }
@@ -3611,8 +4331,13 @@ struct CompactReaderDestination: View {
 
     private var edgeBackGesture: some Gesture {
         DragGesture(minimumDistance: 18, coordinateSpace: .local)
+            .updating($edgeBackSwipeActive) { value, state, _ in
+                let horizontal = max(0, value.translation.width)
+                let vertical = abs(value.translation.height)
+                guard horizontal > 14, horizontal > vertical * 1.35 else { return }
+                state = true
+            }
             .onEnded { value in
-                guard value.startLocation.x <= 28 else { return }
                 guard value.translation.width > 70 else { return }
                 guard abs(value.translation.height) < 80 else { return }
                 dismiss()
@@ -3699,7 +4424,7 @@ struct ArticleSidebar: View {
                         selecting: false
                     )
                     .tag(article.id)
-                    .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))
+                    .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
                     .contextMenu {
@@ -3837,18 +4562,15 @@ struct ArticleRow: View {
             }
         }
         .padding(.vertical, 9)
-        .padding(.leading, 24)
-        .padding(.trailing, 24)
-        .frame(minHeight: 70, alignment: .center)
+        .padding(.leading, 16)
+        .padding(.trailing, 16)
+        .frame(minHeight: 82, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .background {
-            ZStack {
-                theme.background
-                if selected {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(theme.selectedPanel)
-                }
+            if selected {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(theme.selectedPanel)
             }
         }
     }
@@ -4002,6 +4724,7 @@ struct ReaderDetailView: View {
     let article: Article
     @ObservedObject var store: ReaderStore
     var onChromeVisibilityChange: ((Bool) -> Void)?
+    var scrollDisabled = false
     let onArchive: () -> Void
     let onDelete: () -> Void
     @State private var showPreferences = false
@@ -4009,11 +4732,6 @@ struct ReaderDetailView: View {
     @StateObject private var scrollTracker = ReaderScrollTracker()
 
     var body: some View {
-        #if os(iOS)
-        let shouldRestoreScrollPosition = store.progress(for: article.id) > 0.02 && !didRestoreScrollPosition
-        #else
-        let shouldRestoreScrollPosition = false
-        #endif
         ZStack(alignment: .bottom) {
             GeometryReader { proxy in
                 let outerWidth = min(proxy.size.width, contentWidth)
@@ -4070,7 +4788,7 @@ struct ReaderDetailView: View {
                         #endif
                     }
                 }
-                .opacity(shouldRestoreScrollPosition ? 0 : 1)
+                .scrollDisabled(scrollDisabled)
             }
 
             ReaderCommandBar(store: store, article: article, onArchive: onArchive, onDelete: onDelete)
@@ -4092,17 +4810,17 @@ struct ReaderDetailView: View {
             scrollTracker.lastY = nil
             scrollTracker.lastKnownProgress = store.progress(for: article.id)
             scrollTracker.lastReportedProgress = scrollTracker.lastKnownProgress
-            setChromeVisible(startsAtTop)
+            setChromeVisible(startsAtTop, force: true)
         }
         .onDisappear {
             store.setProgress(scrollTracker.lastKnownProgress, articleId: article.id, forcePersist: true)
-            setChromeVisible(true)
+            setChromeVisible(true, force: true)
         }
         .onChange(of: didRestoreScrollPosition) { _, restored in
             guard restored else { return }
             scrollTracker.lastKnownProgress = store.progress(for: article.id)
             scrollTracker.lastReportedProgress = scrollTracker.lastKnownProgress
-            setChromeVisible(false)
+            setChromeVisible(false, force: true)
         }
     }
 
@@ -4126,7 +4844,7 @@ struct ReaderDetailView: View {
         #if os(macOS)
         48
         #else
-        74
+        132
         #endif
     }
 
@@ -4156,9 +4874,9 @@ struct ReaderDetailView: View {
 
         if y >= -8 {
             setChromeVisible(true)
-        } else if y > lastScrollY + 1 {
+        } else if y > lastScrollY + 2 {
             setChromeVisible(true)
-        } else if y < lastScrollY - 4 || (showPreferences && y < -72) {
+        } else if y < lastScrollY - 2 {
             setChromeVisible(false)
         }
         reportProgressIfNeeded(state.progress)
@@ -4174,9 +4892,11 @@ struct ReaderDetailView: View {
         store.setProgress(progress, articleId: article.id, markReadOnCompletion: false)
     }
 
-    private func setChromeVisible(_ visible: Bool) {
+    private func setChromeVisible(_ visible: Bool, force: Bool = false) {
         if showPreferences != visible {
             showPreferences = visible
+        } else if !force {
+            return
         }
         onChromeVisibilityChange?(visible)
         #if os(iOS)
@@ -4273,10 +4993,10 @@ struct ReaderCommandBar: View {
             .sheet(isPresented: $showingSettings) {
                 ReaderSettingsPanel(store: store)
                     .padding(.horizontal, 12)
-                    .padding(.top, 2)
-                    .padding(.bottom, 8)
+                    .padding(.top, 14)
+                    .padding(.bottom, 10)
                     .background(.clear)
-                    .presentationDetents([.height(258), .medium])
+                    .presentationDetents([.height(282), .medium])
                     .presentationDragIndicator(.visible)
                     .presentationBackground(.clear)
                     .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
@@ -4408,7 +5128,7 @@ struct ReaderSettingsPanel: View {
     @ObservedObject var store: ReaderStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
+        VStack(alignment: .leading, spacing: 18) {
             SettingsMenuRow(title: "Theme", value: store.themePreference.label, theme: store.theme) {
                 ForEach(ReaderTheme.displayOrder) { theme in
                     Button {
@@ -4445,9 +5165,9 @@ struct ReaderSettingsPanel: View {
                 Slider(value: Binding(get: { store.lineSpacing }, set: { store.setLineSpacing($0) }), in: 2...18, step: 1)
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 6)
-        .padding(.bottom, 8)
+        .padding(.horizontal, 20)
+        .padding(.top, 22)
+        .padding(.bottom, 18)
         .background(Color.clear)
         .tint(store.theme.primary)
         .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
@@ -4471,7 +5191,7 @@ struct SettingsMenuRow<MenuContent: View>: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
             Text(title)
-                .font(.system(.body, design: .default, weight: .regular))
+                .font(.system(.body, design: .default, weight: .semibold))
                 .foregroundStyle(theme.primary)
 
             Spacer(minLength: 18)
@@ -4481,7 +5201,7 @@ struct SettingsMenuRow<MenuContent: View>: View {
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
                     Text(value)
-                        .font(.system(.body, design: .default, weight: .medium))
+                        .font(.system(.body, design: .default, weight: .regular))
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 10, weight: .semibold))
                         .baselineOffset(1)
@@ -4493,7 +5213,7 @@ struct SettingsMenuRow<MenuContent: View>: View {
             .preferredColorScheme(theme.isDark ? .dark : .light)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: 30)
+        .frame(minHeight: 34)
     }
 }
 
@@ -4511,27 +5231,39 @@ struct SettingsSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text(title)
+                    .font(.system(.body, design: .default, weight: .semibold))
                 Spacer()
                 if let value {
                     Text(value)
+                        .font(.system(.body, design: .default, weight: .regular))
                         .foregroundStyle(theme.secondary)
                 }
             }
-            .font(.system(.body, design: .default, weight: .regular))
             .foregroundStyle(theme.primary)
 
             content
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 0)
     }
 }
 
 struct ReaderScrollState: Equatable {
     let y: CGFloat
     let progress: Double
+}
+
+private func readerProgress(contentOffsetY: CGFloat, contentHeight: CGFloat, containerHeight: CGFloat) -> Double {
+    let scrollableHeight = contentHeight - containerHeight
+    guard scrollableHeight > 1 else { return 0 }
+    let offset = min(max(0, contentOffsetY), scrollableHeight)
+    guard offset > 1 else { return 0 }
+    let remaining = contentHeight - (offset + containerHeight)
+    let completionSlack = min(120, max(24, scrollableHeight * 0.08))
+    if remaining <= completionSlack { return 1 }
+    return min(1, max(0, offset / scrollableHeight))
 }
 
 final class ReaderScrollTracker: ObservableObject {
@@ -4552,16 +5284,31 @@ struct TrackableScrollView<Content: View>: View {
             .coordinateSpace(name: "readerScroll")
 
         #if os(iOS)
-        scrollView
-            .background(ScrollViewOffsetObserver(onScrollChange: onScrollChange).frame(width: 0, height: 0))
-        #else
-        if #available(iOS 18.0, macOS 15.0, *) {
+        if #available(iOS 18.0, *) {
             scrollView
                 .onScrollGeometryChange(for: ReaderScrollState.self) { geometry in
-                    let scrollableHeight = max(1, geometry.contentSize.height - geometry.containerSize.height)
-                    let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                    let remaining = geometry.contentSize.height - bottomOffset
-                    let progress = remaining <= 140 ? 1 : min(1, max(0, geometry.contentOffset.y / scrollableHeight))
+                    let progress = readerProgress(
+                        contentOffsetY: geometry.contentOffset.y,
+                        contentHeight: geometry.contentSize.height,
+                        containerHeight: geometry.containerSize.height
+                    )
+                    return ReaderScrollState(y: -geometry.contentOffset.y, progress: progress)
+                } action: { _, state in
+                    onScrollChange(state)
+                }
+        } else {
+            scrollView
+                .background(ScrollViewOffsetObserver(onScrollChange: onScrollChange).frame(width: 0, height: 0))
+        }
+        #else
+        if #available(macOS 15.0, *) {
+            scrollView
+                .onScrollGeometryChange(for: ReaderScrollState.self) { geometry in
+                    let progress = readerProgress(
+                        contentOffsetY: geometry.contentOffset.y,
+                        contentHeight: geometry.contentSize.height,
+                        containerHeight: geometry.containerSize.height
+                    )
                     return ReaderScrollState(y: -geometry.contentOffset.y, progress: progress)
                 } action: { _, state in
                     onScrollChange(state)
@@ -4640,10 +5387,11 @@ struct ScrollViewOffsetObserver: UIViewRepresentable {
         }
 
         private func emit(_ scrollView: UIScrollView) {
-            let scrollableHeight = max(1, scrollView.contentSize.height - scrollView.bounds.height)
-            let bottomOffset = scrollView.contentOffset.y + scrollView.bounds.height
-            let remaining = scrollView.contentSize.height - bottomOffset
-            let progress = remaining <= 140 ? 1 : min(1, max(0, scrollView.contentOffset.y / scrollableHeight))
+            let progress = readerProgress(
+                contentOffsetY: scrollView.contentOffset.y,
+                contentHeight: scrollView.contentSize.height,
+                containerHeight: scrollView.bounds.height
+            )
             onScrollChange(ReaderScrollState(y: -scrollView.contentOffset.y, progress: progress))
         }
     }
@@ -4670,22 +5418,29 @@ struct ScrollPositionRestorer: UIViewRepresentable {
     final class Coordinator {
         private var attempts = 0
         private var restoring = false
+        private var targetProgress: Double?
 
         func restore(progress: Double, didRestore: Binding<Bool>, from view: UIView) {
             guard !didRestore.wrappedValue, progress > 0.02, !restoring else { return }
+            targetProgress = progress
             attempts = 0
             restoring = true
-            attemptRestore(progress: progress, didRestore: didRestore, from: view)
+            attemptRestore(progress: targetProgress ?? progress, didRestore: didRestore, from: view, scheduled: false)
         }
 
-        private func attemptRestore(progress: Double, didRestore: Binding<Bool>, from view: UIView) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + (attempts == 0 ? 0 : 0.035)) {
+        private func attemptRestore(progress: Double, didRestore: Binding<Bool>, from view: UIView, scheduled: Bool = true) {
+            let work = {
                 guard !didRestore.wrappedValue else {
                     self.restoring = false
                     return
                 }
                 guard let scrollView = view.enclosingScrollView else {
                     self.retry(progress: progress, didRestore: didRestore, from: view)
+                    return
+                }
+
+                guard !scrollView.isTracking, !scrollView.isDragging, !scrollView.isDecelerating else {
+                    self.finishWithoutRestoring(didRestore: didRestore)
                     return
                 }
 
@@ -4697,20 +5452,35 @@ struct ScrollPositionRestorer: UIViewRepresentable {
                 }
 
                 let targetY = min(maxOffset, max(0, maxOffset * progress))
-                scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: false)
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                UIView.performWithoutAnimation {
+                    scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: false)
+                    scrollView.layoutIfNeeded()
+                }
+                CATransaction.commit()
                 didRestore.wrappedValue = true
                 self.restoring = false
+            }
+            if scheduled {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.02, execute: work)
+            } else {
+                work()
             }
         }
 
         private func retry(progress: Double, didRestore: Binding<Bool>, from view: UIView) {
             attempts += 1
-            guard attempts < 14 else {
-                didRestore.wrappedValue = true
-                restoring = false
+            guard attempts < 18 else {
+                finishWithoutRestoring(didRestore: didRestore)
                 return
             }
             attemptRestore(progress: progress, didRestore: didRestore, from: view)
+        }
+
+        private func finishWithoutRestoring(didRestore: Binding<Bool>) {
+            didRestore.wrappedValue = true
+            restoring = false
         }
     }
 }
@@ -4869,16 +5639,30 @@ struct NativeSelectableTextView: UIViewRepresentable {
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
-        let signature = "\(text.hashValue)-\(theme.rawValue)-\(readerFont.rawValue)-\(textSize)-\(lineSpacing)-\(availableWidth)-\(highlightsVersion)-\(highlights.hashValue)"
+        let width = normalizedWidth
+        textView.bounds.size.width = width
+        textView.textContainer.size = CGSize(width: width, height: .greatestFiniteMagnitude)
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+
+        let signature = "\(text.hashValue)-\(theme.rawValue)-\(readerFont.rawValue)-\(textSize)-\(lineSpacing)-\(Int((width * 10).rounded()))-\(highlightsVersion)-\(highlights.hashValue)"
         if context.coordinator.signature != signature {
             context.coordinator.signature = signature
-            textView.attributedText = attributedText
-            recalculateHeight(textView)
+            UIView.performWithoutAnimation {
+                textView.attributedText = attributedText
+                textView.layoutIfNeeded()
+            }
+            recalculateHeight(textView, width: width)
         } else if height <= 1 {
-            recalculateHeight(textView)
+            recalculateHeight(textView, width: width)
         }
         textView.textColor = UIColor(theme.primary)
-        textView.textContainer.size = CGSize(width: availableWidth, height: .greatestFiniteMagnitude)
+    }
+
+    private var normalizedWidth: CGFloat {
+        let scale = max(1, UIScreen.main.scale)
+        let width = max(1, availableWidth)
+        return (width * scale).rounded(.down) / scale
     }
 
     private var attributedText: NSAttributedString {
@@ -4918,12 +5702,20 @@ struct NativeSelectableTextView: UIViewRepresentable {
         return ranges
     }
 
-    private func recalculateHeight(_ textView: UITextView) {
-        let width = max(1, availableWidth)
+    private func recalculateHeight(_ textView: UITextView, width: CGFloat) {
+        textView.bounds.size.width = width
+        textView.textContainer.size = CGSize(width: width, height: .greatestFiniteMagnitude)
+        textView.layoutManager.ensureLayout(for: textView.textContainer)
         let size = textView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
-        guard size.height.isFinite, abs(height - size.height) > 1 else { return }
+        let usedHeight = textView.layoutManager.usedRect(for: textView.textContainer).height
+        let targetHeight = ceil(max(size.height, usedHeight))
+        guard targetHeight.isFinite, abs(height - targetHeight) > 0.5 else { return }
         DispatchQueue.main.async {
-            height = size.height
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                height = targetHeight
+            }
         }
     }
 
@@ -5065,7 +5857,7 @@ struct NativeSelectableTextView: UIViewRepresentable {
             if #available(iOS 16.0, *) {
                 editMenuInteraction?.dismissMenu()
             }
-            parent.recalculateHeight(textView)
+            parent.recalculateHeight(textView, width: parent.normalizedWidth)
         }
 
         private func deleteHighlight(in textView: UITextView, range: NSRange) {
@@ -5077,7 +5869,7 @@ struct NativeSelectableTextView: UIViewRepresentable {
             textView.attributedText = mutable
             textView.selectedRange = NSRange(location: fullRange.location, length: 0)
             parent.onRemoveHighlight(highlightedText)
-            parent.recalculateHeight(textView)
+            parent.recalculateHeight(textView, width: parent.normalizedWidth)
         }
 
         private func contiguousHighlightRange(in attributed: NSAttributedString, containing range: NSRange) -> NSRange {
