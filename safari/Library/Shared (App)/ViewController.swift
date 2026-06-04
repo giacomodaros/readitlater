@@ -1101,7 +1101,7 @@ private struct MatterImportRecord: Encodable {
 private enum MatterCSVError: LocalizedError {
     case unreadable
     case missingColumns([String])
-    case empty
+    case empty(String)
 
     var errorDescription: String? {
         switch self {
@@ -1109,8 +1109,8 @@ private enum MatterCSVError: LocalizedError {
             "The Matter CSV could not be read."
         case .missingColumns(let columns):
             "The Matter CSV is missing: \(columns.joined(separator: ", "))."
-        case .empty:
-            "The Matter CSV appears to be empty or contains no importable URLs."
+        case .empty(let detail):
+            "The Matter CSV contains no importable URLs. \(detail)"
         }
     }
 }
@@ -1125,7 +1125,7 @@ private enum MatterCSVParser {
         let text = decoded
             .replacingOccurrences(of: "\u{0000}", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { throw MatterCSVError.empty }
+        guard !text.isEmpty else { throw MatterCSVError.empty("Read 0 text characters from \(data.count) bytes.") }
 
         let rows = parseRows(text)
         guard let headerIndex = rows.firstIndex(where: { row in
@@ -1135,7 +1135,9 @@ private enum MatterCSVParser {
         }) else {
             let fallback = matterColumnOrderRecords(from: rows)
             if !fallback.isEmpty { return fallback }
-            throw MatterCSVError.empty
+            let scanned = scannedURLRecords(from: text)
+            if !scanned.isEmpty { return scanned }
+            throw MatterCSVError.empty(diagnostics(data: data, text: text, rows: rows))
         }
         let header = rows[headerIndex]
         let columns = columnMap(from: header)
@@ -1185,7 +1187,9 @@ private enum MatterCSVParser {
         if parsed.isEmpty {
             let fallback = matterColumnOrderRecords(from: rows)
             if !fallback.isEmpty { return fallback }
-            throw MatterCSVError.empty
+            let scanned = scannedURLRecords(from: text)
+            if !scanned.isEmpty { return scanned }
+            throw MatterCSVError.empty(diagnostics(data: data, text: text, rows: rows))
         }
         return parsed
     }
@@ -1274,6 +1278,59 @@ private enum MatterCSVParser {
         let normalized = value.contains("://") ? value : "https://\(value)"
         guard let url = URL(string: normalized) else { return false }
         return url.scheme == "http" || url.scheme == "https"
+    }
+
+    private static func scannedURLRecords(from text: String) -> [MatterImportRecord] {
+        let lines = text.components(separatedBy: .newlines)
+        let pattern = #"https?://[^\s,"'<>)]+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+
+        var seen = Set<String>()
+        var records: [MatterImportRecord] = []
+        for line in lines {
+            let nsLine = line as NSString
+            let matches = regex.matches(in: line, range: NSRange(location: 0, length: nsLine.length))
+            guard let match = matches.first else { continue }
+            let rawURL = nsLine.substring(with: match.range).trimmingCharacters(in: CharacterSet(charactersIn: ".,);]}>"))
+            guard isImportableURL(rawURL), seen.insert(rawURL).inserted else { continue }
+
+            let cells = parseRows(line).first ?? []
+            let title = cleanedScannedTitle(from: cells, url: rawURL)
+            let inQueue = cells.count > 6 ? parseBool(value(in: cells, at: 6)) : false
+            let read = cells.count > 8 ? parseBool(value(in: cells, at: 8)) : false
+            records.append(MatterImportRecord(
+                title: title,
+                author: cells.count > 1 ? value(in: cells, at: 1) : "",
+                publisher: cells.count > 2 ? value(in: cells, at: 2) : "",
+                wordCount: cells.count > 5 ? parseInt(value(in: cells, at: 5)) : nil,
+                url: rawURL,
+                inQueue: inQueue,
+                read: read,
+                lastInteractionDate: cells.count > 10 ? value(in: cells, at: 10) : nil
+            ))
+        }
+        return records
+    }
+
+    private static func cleanedScannedTitle(from cells: [String], url: String) -> String {
+        let first = cells.first.map { decodeMatterText($0) }?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if first.isEmpty || isImportableURL(first) || normalizedHeader(first) == "title" {
+            return titleFromURL(url)
+        }
+        return first
+    }
+
+    private static func diagnostics(data: Data, text: String, rows: [[String]]) -> String {
+        let urlCount = scannedURLCount(in: text)
+        let firstRow = rows.first?.prefix(6).joined(separator: " | ") ?? "no rows"
+        return "Read \(data.count) bytes, \(text.count) characters, \(rows.count) rows, \(urlCount) URL-looking values. First row: \(firstRow)"
+    }
+
+    private static func scannedURLCount(in text: String) -> Int {
+        let pattern = #"https?://"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return 0 }
+        return regex.numberOfMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length))
     }
 
     private static func decodeMatterText(_ value: String) -> String {
@@ -2223,12 +2280,31 @@ final class ReaderStore: ObservableObject {
         }
 
         do {
-            return await importMatterCSV(data: try Data(contentsOf: url))
+            return await importMatterCSV(data: try coordinatedFileData(from: url))
         } catch {
             loading = false
             errorMessage = error.localizedDescription
             return nil
         }
+    }
+
+    private func coordinatedFileData(from url: URL) throws -> Data {
+        var coordinatorError: NSError?
+        var readResult: Result<Data, Error>?
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinatorError) { coordinatedURL in
+            readResult = Result {
+                try Data(contentsOf: coordinatedURL, options: [.mappedIfSafe])
+            }
+        }
+
+        if let readResult {
+            return try readResult.get()
+        }
+        if let coordinatorError {
+            throw coordinatorError
+        }
+        throw MatterCSVError.unreadable
     }
 
     func importMatterCSV(data: Data) async -> MatterImportResult? {
@@ -2240,7 +2316,23 @@ final class ReaderStore: ObservableObject {
                 loading = false
             }
 
-            let parsedRecords = try MatterCSVParser.records(from: data)
+            matterImportStatus = "Read \(data.count) bytes from Matter CSV"
+            let parsedRecords: [MatterImportRecord]
+            do {
+                parsedRecords = try MatterCSVParser.records(from: data)
+            } catch {
+                matterImportStatus = "Local parse failed. Trying server parser..."
+                do {
+                    let serverResult = try await api.importMatterCSV(data: data)
+                    matterImportStatus = "Refreshing library..."
+                    await refreshAll()
+                    matterImportStatus = serverResult.summary
+                    startMatterHydrationBackfill()
+                    return serverResult
+                } catch {
+                    throw error
+                }
+            }
             var result = MatterImportResult(totalRows: parsedRecords.count)
             var recordsByURL: [String: MatterImportRecord] = [:]
             matterImportStatus = "Parsed \(parsedRecords.count) Matter rows"
@@ -4436,28 +4528,15 @@ struct LibrarySettingsPane: View {
         ) { result in
             switch result {
             case .success(let url):
-                let accessed = url.startAccessingSecurityScopedResource()
-                defer {
-                    if accessed {
-                        url.stopAccessingSecurityScopedResource()
+                importingMatter = true
+                matterImportMessage = nil
+                Task {
+                    if let result = await store.importMatterCSV(from: url) {
+                        matterImportMessage = result.summary
+                    } else {
+                        matterImportMessage = store.errorMessage ?? "Matter import failed."
                     }
-                }
-                do {
-                    let data = try Data(contentsOf: url)
-                    importingMatter = true
-                    matterImportMessage = nil
-                    Task {
-                        if let result = await store.importMatterCSV(data: data) {
-                            matterImportMessage = result.summary
-                        } else {
-                            matterImportMessage = store.errorMessage ?? "Matter import failed."
-                        }
-                        importingMatter = false
-                    }
-                } catch {
                     importingMatter = false
-                    store.errorMessage = error.localizedDescription
-                    matterImportMessage = error.localizedDescription
                 }
             case .failure(let error):
                 matterImportMessage = error.localizedDescription
