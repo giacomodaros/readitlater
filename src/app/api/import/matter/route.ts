@@ -29,8 +29,7 @@ type ParsedMatterCSV = {
 export async function POST(req: NextRequest) {
   try {
     const user = await requireUser();
-    const csv = await readCSVBody(req);
-    const parsed = parseMatterCSV(csv);
+    const parsed = await readImportInput(req);
 
     let skipped = parsed.skipped;
     const byURL = new Map<string, MatterRecord>();
@@ -90,18 +89,44 @@ export async function POST(req: NextRequest) {
   }
 }
 
-async function readCSVBody(req: NextRequest) {
+async function readImportInput(req: NextRequest): Promise<ParsedMatterCSV> {
   const contentType = req.headers.get("content-type")?.toLowerCase() ?? "";
   if (contentType.includes("application/json")) {
     const body = await req.json();
+    if (Array.isArray(body.records)) {
+      const records = body.records.map(recordFromJSON).filter((record): record is MatterRecord => Boolean(record));
+      const skipped = Number.isFinite(Number(body.skipped)) ? Math.max(0, Number(body.skipped)) : 0;
+      const totalRows = Number.isFinite(Number(body.totalRows)) ? Math.max(records.length + skipped, Number(body.totalRows)) : records.length + skipped;
+      return { totalRows, skipped, records };
+    }
+
     const csv = typeof body.csv === "string" ? body.csv : "";
     if (!csv.trim()) throw new Error("CSV is empty.");
-    return csv;
+    return parseMatterCSV(csv);
   }
 
   const csv = await req.text();
   if (!csv.trim()) throw new Error("CSV is empty.");
-  return csv;
+  return parseMatterCSV(csv);
+}
+
+function recordFromJSON(value: unknown): MatterRecord | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const url = typeof record.url === "string" ? record.url : "";
+  if (!url.trim()) return null;
+
+  const wordCount = Number(record.wordCount);
+  return {
+    url,
+    title: typeof record.title === "string" ? cleanText(record.title) : null,
+    author: typeof record.author === "string" ? cleanText(record.author) : null,
+    publisher: typeof record.publisher === "string" ? cleanText(record.publisher) : null,
+    wordCount: Number.isFinite(wordCount) && wordCount > 0 ? Math.round(wordCount) : null,
+    inQueue: record.inQueue === true,
+    read: record.read === true,
+    lastInteractionDate: typeof record.lastInteractionDate === "string" ? parseMatterDate(record.lastInteractionDate) : null,
+  };
 }
 
 async function upsertMatterChunk(userId: string, records: MatterRecord[]) {

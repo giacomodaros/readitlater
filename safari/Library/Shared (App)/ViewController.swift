@@ -765,6 +765,33 @@ final class ReaderAPI {
         let _: EmptyResponse = try await send(path: "api/articles/\(id)", method: "DELETE")
     }
 
+    func bulkDeleteArticles(ids: [String]) async throws -> BulkActionResponse {
+        try await send(path: "api/articles/bulk", method: "POST", body: BulkActionBody(
+            action: "delete",
+            ids: ids,
+            archived: nil,
+            read: nil
+        ))
+    }
+
+    func bulkSetArchived(_ archived: Bool, ids: [String]) async throws -> BulkActionResponse {
+        try await send(path: "api/articles/bulk", method: "POST", body: BulkActionBody(
+            action: "archive",
+            ids: ids,
+            archived: archived,
+            read: nil
+        ))
+    }
+
+    func bulkSetRead(_ read: Bool, ids: [String]) async throws -> BulkActionResponse {
+        try await send(path: "api/articles/bulk", method: "POST", body: BulkActionBody(
+            action: "read",
+            ids: ids,
+            archived: nil,
+            read: read
+        ))
+    }
+
     func importMatterCSV(data: Data) async throws -> MatterImportResult {
         try await sendRaw(
             path: "api/import/matter",
@@ -772,6 +799,22 @@ final class ReaderAPI {
             contentType: "text/csv; charset=utf-8",
             bodyData: data
         )
+    }
+
+    fileprivate func importMatterRecords(_ records: [MatterImportRecord], totalRows: Int, skipped: Int) async throws -> MatterImportResult {
+        try await send(path: "api/import/matter", method: "POST", body: MatterImportBatchBody(
+            records: records,
+            totalRows: totalRows,
+            skipped: skipped
+        ))
+    }
+
+    fileprivate func hydrateMatterArticles(urls: [String]) async throws -> MatterHydrationResult {
+        try await send(path: "api/import/matter/hydrate", method: "POST", body: MatterHydrationBody(urls: urls, limit: nil))
+    }
+
+    fileprivate func hydratePendingMatterArticles(limit: Int = 4) async throws -> MatterHydrationResult {
+        try await send(path: "api/import/matter/hydrate", method: "POST", body: MatterHydrationBody(urls: [], limit: limit))
     }
 
     private func send<Response: Decodable>(path: String, method: String = "GET", queryItems: [URLQueryItem] = []) async throws -> Response {
@@ -866,21 +909,87 @@ private struct SaveArticleBody: Encodable {
     let readAt: Bool?
 }
 
+private struct BulkActionBody: Encodable {
+    let action: String
+    let ids: [String]
+    let archived: Bool?
+    let read: Bool?
+}
+
+struct BulkActionResponse: Codable, Equatable {
+    let count: Int
+}
+
+private struct MatterImportBatchBody: Encodable {
+    let records: [MatterImportRecord]
+    let totalRows: Int
+    let skipped: Int
+}
+
+private struct MatterHydrationBody: Encodable {
+    let urls: [String]
+    var limit: Int?
+}
+
+private struct MatterHydrationResult: Codable, Equatable {
+    var hydrated = 0
+    var skipped = 0
+    var failed = 0
+    var remaining = 0
+    var lastError: String?
+}
+
 struct MatterImportResult: Codable, Equatable {
     var totalRows = 0
     var queued = 0
     var archived = 0
     var skipped = 0
     var failed = 0
+    var hydrated = 0
+    var remainingHydration = 0
     var lastError: String?
 
     var imported: Int { queued + archived }
+
+    init(
+        totalRows: Int = 0,
+        queued: Int = 0,
+        archived: Int = 0,
+        skipped: Int = 0,
+        failed: Int = 0,
+        hydrated: Int = 0,
+        remainingHydration: Int = 0,
+        lastError: String? = nil
+    ) {
+        self.totalRows = totalRows
+        self.queued = queued
+        self.archived = archived
+        self.skipped = skipped
+        self.failed = failed
+        self.hydrated = hydrated
+        self.remainingHydration = remainingHydration
+        self.lastError = lastError
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        totalRows = try container.decodeIfPresent(Int.self, forKey: .totalRows) ?? 0
+        queued = try container.decodeIfPresent(Int.self, forKey: .queued) ?? 0
+        archived = try container.decodeIfPresent(Int.self, forKey: .archived) ?? 0
+        skipped = try container.decodeIfPresent(Int.self, forKey: .skipped) ?? 0
+        failed = try container.decodeIfPresent(Int.self, forKey: .failed) ?? 0
+        hydrated = try container.decodeIfPresent(Int.self, forKey: .hydrated) ?? 0
+        remainingHydration = try container.decodeIfPresent(Int.self, forKey: .remainingHydration) ?? 0
+        lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
+    }
 
     var summary: String {
         var parts = ["Parsed \(totalRows)", "Imported \(imported)"]
         parts.append("\(queued) inbox")
         parts.append("\(archived) archive")
         if skipped > 0 { parts.append("\(skipped) skipped") }
+        if hydrated > 0 { parts.append("\(hydrated) hydrated") }
+        if remainingHydration > 0 { parts.append("\(remainingHydration) hydrating") }
         if failed > 0 { parts.append("\(failed) failed") }
         if imported == 0, let lastError {
             parts.append(lastError)
@@ -889,7 +998,7 @@ struct MatterImportResult: Codable, Equatable {
     }
 }
 
-private struct MatterImportRecord {
+private struct MatterImportRecord: Encodable {
     let title: String
     let author: String
     let publisher: String
@@ -897,6 +1006,7 @@ private struct MatterImportRecord {
     let url: String
     let inQueue: Bool
     let read: Bool
+    let lastInteractionDate: String?
 
     var normalizedURL: URL? {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1026,6 +1136,7 @@ private enum MatterCSVParser {
         let authorIndex = columns["author"]
         let publisherIndex = columns["publisher"]
         let wordCountIndex = columns["word count"]
+        let lastInteractionIndex = columns["last interaction date"]
 
         let parsed: [MatterImportRecord] = rows.dropFirst().compactMap { (row: [String]) -> MatterImportRecord? in
             guard !row.allSatisfy({ $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
@@ -1037,10 +1148,11 @@ private enum MatterCSVParser {
                 title: titleIndex.map { value(in: row, at: $0) } ?? "",
                 author: authorIndex.map { value(in: row, at: $0) } ?? "",
                 publisher: publisherIndex.map { value(in: row, at: $0) } ?? "",
-                wordCount: wordCountIndex.flatMap { Int(value(in: row, at: $0)) },
+                wordCount: wordCountIndex.flatMap { parseInt(value(in: row, at: $0)) },
                 url: url,
                 inQueue: parseBool(value(in: row, at: queueIndex)),
-                read: readIndex.map { parseBool(value(in: row, at: $0)) } ?? false
+                read: readIndex.map { parseBool(value(in: row, at: $0)) } ?? false,
+                lastInteractionDate: lastInteractionIndex.map { value(in: row, at: $0) }
             )
         }
         if parsed.isEmpty {
@@ -1070,6 +1182,12 @@ private enum MatterCSVParser {
         default:
             return false
         }
+    }
+
+    private static func parseInt(_ value: String) -> Int? {
+        let digits = value.filter { $0.isNumber || $0 == "-" }
+        guard let parsed = Int(digits), parsed > 0 else { return nil }
+        return parsed
     }
 
     private static func parseRows(_ text: String) -> [[String]] {
@@ -1145,7 +1263,8 @@ private enum MatterCSVParser {
                 wordCount: nil,
                 url: raw,
                 inQueue: false,
-                read: false
+                read: false,
+                lastInteractionDate: nil
             )
         }
     }
@@ -1197,6 +1316,7 @@ final class ReaderStore: ObservableObject {
     private var lastInboxFetch: Date?
     private var lastArchiveFetch: Date?
     private var backgroundFetchTask: Task<Void, Never>?
+    private var matterHydrationTask: Task<Void, Never>?
     private var loadGeneration = 0
 
     var theme: ReaderTheme {
@@ -1212,7 +1332,10 @@ final class ReaderStore: ObservableObject {
         guard isSignedIn else { return }
         loadCachedArticles()
         loadCachedSnapshots()
-        Task { await refreshAll() }
+        Task {
+            await refreshAll()
+            startMatterHydrationBackfill()
+        }
     }
 
     func refreshAll() async {
@@ -1309,6 +1432,8 @@ final class ReaderStore: ObservableObject {
         persistedProgress = [:]
         transientProgress = [:]
         markingReadArticleIds.removeAll()
+        matterHydrationTask?.cancel()
+        matterHydrationTask = nil
         cacheSaveWorkItem?.cancel()
     }
 
@@ -1493,6 +1618,11 @@ final class ReaderStore: ObservableObject {
             articleDetails[article.id] = fetched
             selectedArticle = fetched
             saveCache()
+            if isMatterPlaceholder(fetched),
+               let hydrated = await hydrateMatterArticleIfNeeded(fetched) {
+                selectedArticle = hydrated
+                return hydrated
+            }
             return fetched
         } catch {
             errorMessage = error.localizedDescription
@@ -1709,6 +1839,22 @@ final class ReaderStore: ObservableObject {
         }
     }
 
+    func toggleSelectAllVisibleArticles() {
+        let visibleIds = Set(articles.map(\.id))
+        guard !visibleIds.isEmpty else { return }
+        selectionMode = true
+        if visibleIds.isSubset(of: selectedIds) {
+            selectedIds.subtract(visibleIds)
+        } else {
+            selectedIds.formUnion(visibleIds)
+        }
+    }
+
+    func selectAllVisibleArticles() {
+        selectionMode = true
+        selectedIds.formUnion(articles.map(\.id))
+    }
+
     func enterSelectionMode(initial: String? = nil) {
         selectionMode = true
         selectedIds.removeAll()
@@ -1723,26 +1869,117 @@ final class ReaderStore: ObservableObject {
     func bulkArchive() async {
         let targets = articles.filter { selectedIds.contains($0.id) }
         let target = !archived
-        for summary in targets {
-            await setArchived(target, summary: summary)
+        guard !targets.isEmpty else {
+            exitSelectionMode()
+            return
         }
+        let ids = targets.map(\.id)
+        locallySetArchived(target, summaries: targets)
         exitSelectionMode()
+        do {
+            _ = try await api.bulkSetArchived(target, ids: ids)
+        } catch {
+            errorMessage = error.localizedDescription
+            await refreshAll()
+        }
     }
 
     func bulkDelete() async {
         let targets = articles.filter { selectedIds.contains($0.id) }
-        for summary in targets {
-            await delete(summary)
+        guard !targets.isEmpty else {
+            exitSelectionMode()
+            return
         }
+        let ids = targets.map(\.id)
+        locallyDeleteArticles(ids: Set(ids))
         exitSelectionMode()
+        do {
+            _ = try await api.bulkDeleteArticles(ids: ids)
+        } catch {
+            errorMessage = error.localizedDescription
+            await refreshAll()
+        }
     }
 
     func bulkMarkRead(_ read: Bool) async {
         let targets = articles.filter { selectedIds.contains($0.id) }
-        for summary in targets {
-            await setRead(read, articleId: summary.id)
+        guard !targets.isEmpty else {
+            exitSelectionMode()
+            return
         }
+        let ids = targets.map(\.id)
+        locallySetRead(read, ids: Set(ids))
         exitSelectionMode()
+        do {
+            _ = try await api.bulkSetRead(read, ids: ids)
+        } catch {
+            errorMessage = error.localizedDescription
+            await refreshAll()
+        }
+    }
+
+    private func locallyDeleteArticles(ids: Set<String>) {
+        articles.removeAll { ids.contains($0.id) }
+        inboxArticles.removeAll { ids.contains($0.id) }
+        archiveArticles.removeAll { ids.contains($0.id) }
+        for id in ids {
+            articleDetails.removeValue(forKey: id)
+            readingProgress.removeValue(forKey: id)
+            persistedProgress.removeValue(forKey: id)
+            transientProgress.removeValue(forKey: id)
+        }
+        if let selectedId, ids.contains(selectedId) {
+            self.selectedId = nil
+            selectedArticle = nil
+        }
+        persistSideCache(archived: false, articles: inboxArticles)
+        persistSideCache(archived: true, articles: archiveArticles)
+        saveCache()
+    }
+
+    private func locallySetArchived(_ targetArchived: Bool, summaries: [ArticleSummary]) {
+        let ids = Set(summaries.map(\.id))
+        let updated = summaries.map { $0.updating(archived: targetArchived) }
+        articles.removeAll { ids.contains($0.id) }
+        inboxArticles.removeAll { ids.contains($0.id) }
+        archiveArticles.removeAll { ids.contains($0.id) }
+
+        if targetArchived {
+            archiveArticles = mergeSummaries(existing: archiveArticles, incoming: updated)
+        } else {
+            inboxArticles = mergeSummaries(existing: inboxArticles, incoming: updated)
+        }
+
+        for summary in updated {
+            if let detail = articleDetails[summary.id] {
+                articleDetails[summary.id] = detail.updating(archived: targetArchived)
+            }
+        }
+        if let selectedId, ids.contains(selectedId) {
+            self.selectedId = nil
+            selectedArticle = nil
+        }
+        persistSideCache(archived: false, articles: inboxArticles)
+        persistSideCache(archived: true, articles: archiveArticles)
+        saveCache()
+    }
+
+    private func locallySetRead(_ read: Bool, ids: Set<String>) {
+        let targetReadAt: Date? = read ? Date() : nil
+        articles = articles.map { ids.contains($0.id) ? $0.updating(readAt: .some(targetReadAt)) : $0 }
+        inboxArticles = inboxArticles.map { ids.contains($0.id) ? $0.updating(readAt: .some(targetReadAt)) : $0 }
+        archiveArticles = archiveArticles.map { ids.contains($0.id) ? $0.updating(readAt: .some(targetReadAt)) : $0 }
+        for id in ids {
+            if let detail = articleDetails[id] {
+                articleDetails[id] = detail.updating(readAt: .some(targetReadAt))
+            }
+        }
+        if let selectedArticle, ids.contains(selectedArticle.id) {
+            self.selectedArticle = selectedArticle.updating(readAt: .some(targetReadAt))
+        }
+        persistSideCache(archived: false, articles: inboxArticles)
+        persistSideCache(archived: true, articles: archiveArticles)
+        saveCache()
     }
 
     // MARK: - Exports
@@ -1887,8 +2124,41 @@ final class ReaderStore: ObservableObject {
             loading = true
             defer { loading = false }
 
-            let result = try await api.importMatterCSV(data: data)
+            let parsedRecords = try MatterCSVParser.records(from: data)
+            var result = MatterImportResult(totalRows: parsedRecords.count)
+            var recordsByURL: [String: MatterImportRecord] = [:]
+
+            for record in parsedRecords {
+                guard let normalizedURL = record.normalizedURL else {
+                    result.skipped += 1
+                    continue
+                }
+                if recordsByURL[normalizedURL.absoluteString] != nil {
+                    result.skipped += 1
+                }
+                recordsByURL[normalizedURL.absoluteString] = record
+            }
+
+            let importableRecords = Array(recordsByURL.values)
+            let batchSize = 100
+            for start in stride(from: 0, to: importableRecords.count, by: batchSize) {
+                let end = min(start + batchSize, importableRecords.count)
+                let batch = Array(importableRecords[start..<end])
+                do {
+                    let batchResult = try await api.importMatterRecords(batch, totalRows: batch.count, skipped: 0)
+                    result.queued += batchResult.queued
+                    result.archived += batchResult.archived
+                    result.skipped += batchResult.skipped
+                    result.failed += batchResult.failed
+                    result.lastError = batchResult.lastError ?? result.lastError
+                } catch {
+                    result.failed += batch.count
+                    result.lastError = error.localizedDescription
+                }
+            }
+
             await refreshAll()
+            startMatterHydrationBackfill()
             if result.failed > 0, let lastError = result.lastError {
                 errorMessage = "Matter import finished with \(result.failed) failure\(result.failed == 1 ? "" : "s"). Last error: \(lastError)"
             }
@@ -1920,6 +2190,78 @@ final class ReaderStore: ObservableObject {
         return normalized.contains("imported from matter")
             || normalized.contains("matter export does not always include")
             || normalized.contains("saved library history export")
+    }
+
+    private func hydrateMatterArticleIfNeeded(_ article: Article) async -> Article? {
+        guard isMatterPlaceholder(article), !article.url.isEmpty else { return nil }
+        do {
+            let hydration = try await api.hydrateMatterArticles(urls: [article.url])
+            guard hydration.hydrated > 0 else {
+                startMatterHydrationBackfill()
+                return nil
+            }
+            let refreshed = try await api.article(id: article.id)
+            articleDetails[refreshed.id] = refreshed
+            selectedArticle = selectedArticle?.id == refreshed.id ? refreshed : selectedArticle
+            saveCache()
+            return refreshed
+        } catch {
+            startMatterHydrationBackfill()
+            return nil
+        }
+    }
+
+    private func startMatterHydrationBackfill(maxPasses: Int = 500) {
+        guard isSignedIn else { return }
+        if let matterHydrationTask, !matterHydrationTask.isCancelled {
+            return
+        }
+        matterHydrationTask = Task { [weak self] in
+            guard let self else { return }
+            var passes = 0
+            var hydratedSinceRefresh = 0
+            var consecutiveFailures = 0
+
+            while !Task.isCancelled && passes < maxPasses {
+                passes += 1
+                do {
+                    let hydration = try await api.hydratePendingMatterArticles(limit: 4)
+                    hydratedSinceRefresh += hydration.hydrated
+                    consecutiveFailures = hydration.failed > 0 && hydration.hydrated == 0 ? consecutiveFailures + 1 : 0
+
+                    if hydration.hydrated == 0 && hydration.skipped == 0 && hydration.failed == 0 {
+                        break
+                    }
+
+                    if hydratedSinceRefresh >= 12 || hydration.remaining == 0 {
+                        await refreshAll()
+                        hydratedSinceRefresh = 0
+                    }
+
+                    if hydration.remaining == 0 {
+                        break
+                    }
+
+                    if consecutiveFailures >= 4 {
+                        try? await Task.sleep(nanoseconds: 8_000_000_000)
+                        consecutiveFailures = 0
+                    } else {
+                        try? await Task.sleep(nanoseconds: 450_000_000)
+                    }
+                } catch {
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= 4 {
+                        break
+                    }
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
+            }
+
+            if hydratedSinceRefresh > 0 {
+                await refreshAll()
+            }
+            matterHydrationTask = nil
+        }
     }
 
     private func csvEscape(_ value: String) -> String {
@@ -2539,6 +2881,7 @@ private enum CompactLibraryPane: Hashable {
 
 struct CompactLibraryView: View {
     private enum SelectionCommand: Hashable {
+        case selectAll
         case archive
         case read
         case epub
@@ -2902,13 +3245,13 @@ struct CompactLibraryView: View {
                 LinearGradient(
                     stops: [
                         .init(color: .clear, location: 0),
-                        .init(color: store.theme.background.opacity(0.82), location: 0.38),
+                        .init(color: store.theme.background.opacity(0.74), location: 0.52),
                         .init(color: store.theme.background, location: 1),
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 )
-                .frame(height: 146 + proxy.safeAreaInsets.bottom)
+                .frame(height: 104 + proxy.safeAreaInsets.bottom)
                 .padding(.bottom, -proxy.safeAreaInsets.bottom)
             }
         }
@@ -3065,6 +3408,11 @@ struct CompactLibraryView: View {
                     store.enterSelectionMode()
                 } label: {
                     Label("Select", systemImage: "checkmark.circle")
+                }
+                Button {
+                    store.selectAllVisibleArticles()
+                } label: {
+                    Label("Select All", systemImage: "checkmark.circle.fill")
                 }
                 Button {
                     showingAdd = true
@@ -3261,7 +3609,17 @@ struct CompactLibraryView: View {
     @ViewBuilder
     private var selectionToolbar: some View {
         let count = store.selectedIds.count
+        let visibleCount = store.articles.count
+        let allVisibleSelected = visibleCount > 0 && Set(store.articles.map(\.id)).isSubset(of: store.selectedIds)
         HStack(spacing: 8) {
+            selectionButton(
+                command: .selectAll,
+                systemName: allVisibleSelected ? "xmark.circle" : "checkmark.circle",
+                title: allVisibleSelected ? "Clear" : "Select All",
+                disabled: visibleCount == 0
+            ) {
+                store.toggleSelectAllVisibleArticles()
+            }
             selectionButton(
                 command: .archive,
                 systemName: "archivebox",
@@ -3433,8 +3791,6 @@ struct NativeArticleTable: UIViewControllerRepresentable {
         return [
             articleSignature,
             showHeader ? "header" : "no-header",
-            selectedIds.sorted().joined(separator: ","),
-            selectionMode ? "selecting" : "reading",
             theme.rawValue,
             isSearching ? "search" : "normal"
         ].joined(separator: "#")
@@ -3444,6 +3800,7 @@ struct NativeArticleTable: UIViewControllerRepresentable {
         private let tableView = UITableView(frame: .zero, style: .plain)
         private var model: NativeArticleTable?
         private var lastReloadSignature: String?
+        private var lastSelectionSignature: String?
         private var lastHeaderHidden: Bool?
         private var lastScrolledState = false
         private let collapseThreshold: CGFloat = 36
@@ -3478,15 +3835,21 @@ struct NativeArticleTable: UIViewControllerRepresentable {
             self.model = model
             view.backgroundColor = UIColor(model.theme.background)
             tableView.backgroundColor = .clear
-            tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 12, right: 0)
+            tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: model.selectionMode ? 96 : 12, right: 0)
             tableView.verticalScrollIndicatorInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
 
             let signature = model.reloadSignature
+            let selectionSignature = "\(model.selectionMode)#\(model.selectedIds.sorted().joined(separator: ","))"
             let headerVisibilityChanged = lastHeaderHidden != model.headerHidden
+            let selectionChanged = lastSelectionSignature != selectionSignature
             lastHeaderHidden = model.headerHidden
+            lastSelectionSignature = selectionSignature
             guard signature != lastReloadSignature else {
                 if headerVisibilityChanged {
                     updateVisibleHeaderCell(with: model)
+                }
+                if selectionChanged {
+                    updateVisibleArticleCells(with: model)
                 }
                 return
             }
@@ -3517,20 +3880,7 @@ struct NativeArticleTable: UIViewControllerRepresentable {
 
             let article = article(at: indexPath, in: model)
             let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
-            configureBaseCell(cell)
-            resetSwipeState(for: cell)
-            cell.contentConfiguration = UIHostingConfiguration {
-                ArticleRow(
-                    article: article,
-                    selected: model.selectionMode && model.selectedIds.contains(article.id),
-                    theme: model.theme,
-                    progress: model.progress(article.id),
-                    showsModeBadge: model.isSearching,
-                    selecting: model.selectionMode
-                )
-                .background(Color.clear)
-            }
-            .margins(.all, 0)
+            configureArticleCell(cell, article: article, model: model)
             return cell
         }
 
@@ -3557,6 +3907,23 @@ struct NativeArticleTable: UIViewControllerRepresentable {
             .margins(.all, 0)
         }
 
+        private func configureArticleCell(_ cell: UITableViewCell, article: ArticleSummary, model: NativeArticleTable) {
+            configureBaseCell(cell)
+            resetSwipeState(for: cell)
+            cell.contentConfiguration = UIHostingConfiguration {
+                ArticleRow(
+                    article: article,
+                    selected: model.selectionMode && model.selectedIds.contains(article.id),
+                    theme: model.theme,
+                    progress: model.progress(article.id),
+                    showsModeBadge: model.isSearching,
+                    selecting: model.selectionMode
+                )
+                .background(Color.clear)
+            }
+            .margins(.all, 0)
+        }
+
         private func updateVisibleHeaderCell(with model: NativeArticleTable) {
             guard model.showHeader else { return }
             let headerIndexPath = IndexPath(row: 0, section: 0)
@@ -3564,6 +3931,17 @@ struct NativeArticleTable: UIViewControllerRepresentable {
             UIView.performWithoutAnimation {
                 configureHeaderCell(cell, with: model)
                 cell.layoutIfNeeded()
+                tableView.layoutIfNeeded()
+            }
+        }
+
+        private func updateVisibleArticleCells(with model: NativeArticleTable) {
+            UIView.performWithoutAnimation {
+                for cell in tableView.visibleCells {
+                    guard let indexPath = tableView.indexPath(for: cell),
+                          isArticleRow(indexPath, in: model) else { continue }
+                    configureArticleCell(cell, article: article(at: indexPath, in: model), model: model)
+                }
                 tableView.layoutIfNeeded()
             }
         }
