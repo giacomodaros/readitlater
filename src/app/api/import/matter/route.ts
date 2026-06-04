@@ -94,7 +94,7 @@ async function readImportInput(req: NextRequest): Promise<ParsedMatterCSV> {
   if (contentType.includes("application/json")) {
     const body = await req.json();
     if (Array.isArray(body.records)) {
-      const records = body.records.map(recordFromJSON).filter((record): record is MatterRecord => Boolean(record));
+      const records = parseMatterRecordsFromJSON(body.records);
       const skipped = Number.isFinite(Number(body.skipped)) ? Math.max(0, Number(body.skipped)) : 0;
       const totalRows = Number.isFinite(Number(body.totalRows)) ? Math.max(records.length + skipped, Number(body.totalRows)) : records.length + skipped;
       return { totalRows, skipped, records };
@@ -108,6 +108,17 @@ async function readImportInput(req: NextRequest): Promise<ParsedMatterCSV> {
   const csv = await req.text();
   if (!csv.trim()) throw new Error("CSV is empty.");
   return parseMatterCSV(csv);
+}
+
+function parseMatterRecordsFromJSON(value: unknown): MatterRecord[] {
+  if (!Array.isArray(value)) return [];
+
+  const records: MatterRecord[] = [];
+  for (const item of value) {
+    const record = recordFromJSON(item);
+    if (record) records.push(record);
+  }
+  return records;
 }
 
 function recordFromJSON(value: unknown): MatterRecord | null {
