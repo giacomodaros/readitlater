@@ -1031,7 +1031,7 @@ private struct MatterImportRecord: Encodable {
         let titleValue = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let authorValue = author.trimmingCharacters(in: .whitespacesAndNewlines)
         let publisherValue = publisher.trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayTitle = titleValue.isEmpty ? "Imported article" : titleValue
+        let displayTitle = titleValue.isEmpty ? Self.fallbackTitle(from: normalizedURL) : titleValue
         let byline = authorValue.isEmpty ? "" : "<p class=\"byline\">By \(Self.escape(authorValue))</p>"
         let publisherMeta = publisherValue.isEmpty ? "" : "<meta property=\"og:site_name\" content=\"\(Self.escape(publisherValue))\">"
         let publisherLine = publisherValue.isEmpty ? "" : "<p>Publisher: \(Self.escape(publisherValue))</p>"
@@ -1086,6 +1086,16 @@ private struct MatterImportRecord: Encodable {
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
     }
+
+    private static func fallbackTitle(from url: URL?) -> String {
+        guard let url else { return "Untitled" }
+        let lastPath = url.pathComponents.last?.removingPercentEncoding ?? ""
+        let cleaned = lastPath
+            .replacingOccurrences(of: #"\.[A-Za-z0-9]+$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"[-_+]+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? url.host?.replacingOccurrences(of: "www.", with: "") ?? "Untitled" : cleaned
+    }
 }
 
 private enum MatterCSVError: LocalizedError {
@@ -1119,25 +1129,22 @@ private enum MatterCSVParser {
 
         let rows = parseRows(text)
         guard let header = rows.first else {
-            let fallback = fallbackRecords(from: text)
-            if fallback.isEmpty { throw MatterCSVError.empty }
-            return fallback
+            throw MatterCSVError.empty
         }
         let columns = columnMap(from: header)
 
         var missing: [String] = []
         if columnIndex(in: columns, aliases: ["url", "article url", "original url"]) == nil { missing.append("URL") }
+        if columnIndex(in: columns, aliases: ["title", "article title", "name"]) == nil { missing.append("Title") }
         if columnIndex(in: columns, aliases: ["in queue", "queue", "queued"]) == nil { missing.append("In Queue") }
         if !missing.isEmpty {
-            let fallback = fallbackRecords(from: text)
-            if !fallback.isEmpty { return fallback }
             throw MatterCSVError.missingColumns(missing)
         }
 
         let urlIndex = columnIndex(in: columns, aliases: ["url", "article url", "original url"])!
         let queueIndex = columnIndex(in: columns, aliases: ["in queue", "queue", "queued"])!
         let readIndex = columnIndex(in: columns, aliases: ["read"])
-        let titleIndex = columnIndex(in: columns, aliases: ["title", "article title", "name"])
+        let titleIndex = columnIndex(in: columns, aliases: ["title", "article title", "name"])!
         let authorIndex = columnIndex(in: columns, aliases: ["author", "byline"])
         let publisherIndex = columnIndex(in: columns, aliases: ["publisher", "publication", "site", "site name"])
         let wordCountIndex = columnIndex(in: columns, aliases: ["word count", "words", "wordcount"])
@@ -1153,9 +1160,10 @@ private enum MatterCSVParser {
                 return nil
             }
             let url = value(in: row, at: urlIndex)
-            guard !url.isEmpty else { return nil }
+            let title = value(in: row, at: titleIndex)
+            guard !url.isEmpty, !title.isEmpty else { return nil }
             return MatterImportRecord(
-                title: titleIndex.map { value(in: row, at: $0) } ?? "",
+                title: title,
                 author: authorIndex.map { value(in: row, at: $0) } ?? "",
                 publisher: publisherIndex.map { value(in: row, at: $0) } ?? "",
                 wordCount: wordCountIndex.flatMap { parseInt(value(in: row, at: $0)) },
@@ -1166,8 +1174,6 @@ private enum MatterCSVParser {
             )
         }
         if parsed.isEmpty {
-            let fallback = fallbackRecords(from: text)
-            if !fallback.isEmpty { return fallback }
             throw MatterCSVError.empty
         }
         return parsed
@@ -1206,7 +1212,7 @@ private enum MatterCSVParser {
 
     private static func parseBool(_ value: String) -> Bool {
         switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "true", "yes", "1", "y":
+        case "true", "yes", "1", "y", "queued", "queue", "in queue":
             return true
         default:
             return false
@@ -1295,28 +1301,6 @@ private enum MatterCSVParser {
         return rows
     }
 
-    private static func fallbackRecords(from text: String) -> [MatterImportRecord] {
-        let pattern = #"https?://[^\s,"']+"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let nsText = text as NSString
-        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
-        var seen = Set<String>()
-        return matches.compactMap { match in
-            let raw = nsText.substring(with: match.range).trimmingCharacters(in: CharacterSet(charactersIn: ".,);]}>"))
-            guard !raw.isEmpty, seen.insert(raw).inserted else { return nil }
-            let host = URL(string: raw)?.host?.replacingOccurrences(of: "www.", with: "") ?? raw
-            return MatterImportRecord(
-                title: "Imported article",
-                author: "",
-                publisher: host,
-                wordCount: nil,
-                url: raw,
-                inQueue: false,
-                read: false,
-                lastInteractionDate: nil
-            )
-        }
-    }
 }
 
 @MainActor
@@ -2222,6 +2206,8 @@ final class ReaderStore: ObservableObject {
             }
 
             let importableRecords = Array(recordsByURL.values)
+            let inboxCount = importableRecords.filter(\.inQueue).count
+            matterImportStatus = "Parsed \(importableRecords.count) Matter rows · \(inboxCount) inbox · \(importableRecords.count - inboxCount) archive"
             let batchSize = 100
             for start in stride(from: 0, to: importableRecords.count, by: batchSize) {
                 let end = min(start + batchSize, importableRecords.count)

@@ -37,12 +37,17 @@ export async function POST(req: NextRequest) {
     const byURL = new Map<string, MatterRecord>();
     for (const record of parsed.records) {
       const url = normalizeURL(record.url);
+      const title = cleanText(record.title);
       if (!url) {
         skipped += 1;
         continue;
       }
+      if (!title) {
+        skipped += 1;
+        continue;
+      }
       if (byURL.has(url)) skipped += 1;
-      byURL.set(url, { ...record, url });
+      byURL.set(url, { ...record, url, title });
     }
 
     const records = Array.from(byURL.values());
@@ -136,8 +141,8 @@ function recordFromJSON(value: unknown): MatterRecord | null {
     author: typeof record.author === "string" ? cleanText(record.author) : null,
     publisher: typeof record.publisher === "string" ? cleanText(record.publisher) : null,
     wordCount: Number.isFinite(wordCount) && wordCount > 0 ? Math.round(wordCount) : null,
-    inQueue: record.inQueue === true,
-    read: record.read === true,
+    inQueue: parseBooleanValue(record.inQueue),
+    read: parseBooleanValue(record.read),
     lastInteractionDate: typeof record.lastInteractionDate === "string" ? parseMatterDate(record.lastInteractionDate) : null,
   };
 }
@@ -192,7 +197,7 @@ function articleUpdateData(data: ReturnType<typeof articleData>) {
 function articleData(userId: string, record: MatterRecord) {
   const parsed = new URL(record.url);
   const hostname = parsed.hostname.replace(/^www\./, "");
-  const title = cleanText(record.title) ?? "Imported article";
+  const title = cleanText(record.title) ?? titleFromURL(record.url);
   const author = cleanText(record.author);
   const siteName = cleanText(record.publisher) ?? hostname;
   const readAt = record.read ? record.lastInteractionDate ?? new Date() : null;
@@ -216,6 +221,21 @@ function articleData(userId: string, record: MatterRecord) {
     readAt,
     createdAt: record.lastInteractionDate ?? undefined,
   };
+}
+
+function titleFromURL(value: string) {
+  try {
+    const url = new URL(value);
+    const segment = decodeURIComponent(url.pathname.split("/").filter(Boolean).pop() ?? "");
+    const title = segment
+      .replace(/\.[a-z0-9]+$/i, "")
+      .replace(/[-_+]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return title || url.hostname.replace(/^www\./, "");
+  } catch {
+    return "Untitled";
+  }
 }
 
 function placeholderContent(title: string, siteName: string, url: string) {
@@ -342,8 +362,21 @@ function normalizeHeader(value: string) {
 }
 
 function parseBoolean(value: string) {
+  return parseBooleanValue(value);
+}
+
+function parseBooleanValue(value: unknown) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  if (typeof value !== "string") return false;
   const normalized = value.trim().toLowerCase();
-  return normalized === "true" || normalized === "yes" || normalized === "1" || normalized === "y";
+  return normalized === "true"
+    || normalized === "yes"
+    || normalized === "1"
+    || normalized === "y"
+    || normalized === "queued"
+    || normalized === "queue"
+    || normalized === "in queue";
 }
 
 function parseInteger(value: string) {
