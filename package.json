@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "prisma generate && next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "parser:audit": "npx tsx scripts/parser-audit.ts"
   },
   "dependencies": {
     "@extractus/article-extractor": "^8.0.20",

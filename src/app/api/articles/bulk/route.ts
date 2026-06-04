@@ -8,15 +8,7 @@ export async function POST(req: NextRequest) {
   try {
     const user = await requireUser();
     const body = await req.json();
-    const ids = Array.isArray(body.ids)
-      ? Array.from(
-          new Set(
-            body.ids
-              .filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
-              .map((id: string) => id.trim()),
-          ),
-        )
-      : [];
+    const ids = parseArticleIds(body.ids);
     const action = typeof body.action === "string" ? body.action : "";
 
     if (!ids.length) {
@@ -61,4 +53,17 @@ export async function POST(req: NextRequest) {
     const message = error instanceof Error ? error.message : "Bulk action failed.";
     return NextResponse.json({ error: message }, { status: 422 });
   }
+}
+
+function parseArticleIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const id = item.trim();
+    if (id) seen.add(id);
+  }
+
+  return Array.from(seen);
 }

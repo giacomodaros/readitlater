@@ -171,7 +171,11 @@ function parseReaderResponse(url: string, text: string) {
   };
 }
 
-async function extractViaReaderProxy(url: string) {
+type ExtractOptions = {
+  signal?: AbortSignal;
+};
+
+async function extractViaReaderProxy(url: string, options: ExtractOptions = {}) {
   const readerUrl = `https://r.jina.ai/${url}`;
   const res = await fetch(readerUrl, {
     headers: {
@@ -180,6 +184,7 @@ async function extractViaReaderProxy(url: string) {
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
     },
     redirect: "follow",
+    signal: options.signal,
   });
 
   if (!res.ok) {
@@ -249,7 +254,7 @@ export async function extractFromHtml(url: string, html: string) {
 }
 
 /** Fetch and extract via server-side HTTP (works for open, non-rate-limited sites). */
-export async function extractArticle(url: string) {
+export async function extractArticle(url: string, options: ExtractOptions = {}) {
   const headers = {
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
@@ -265,14 +270,15 @@ export async function extractArticle(url: string) {
     res = await fetch(url, {
       headers,
       redirect: "follow",
+      signal: options.signal,
     });
   } catch {
-    return extractViaReaderProxy(url);
+    return extractViaReaderProxy(url, options);
   }
 
   if (!res.ok) {
     if ([401, 403, 406, 418, 429, 451, 503].includes(res.status)) {
-      return extractViaReaderProxy(url);
+      return extractViaReaderProxy(url, options);
     }
     throw new Error(`Failed to fetch article (${res.status})`);
   }
