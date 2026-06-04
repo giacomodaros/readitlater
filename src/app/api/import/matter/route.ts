@@ -6,7 +6,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const CHUNK_SIZE = 300;
+const CHUNK_SIZE = 100;
+const CREATE_CHUNK_SIZE = 40;
+const UPDATE_CHUNK_SIZE = 25;
 const WORDS_PER_MINUTE = 238;
 
 type MatterRecord = {
@@ -52,7 +54,7 @@ export async function POST(req: NextRequest) {
     for (let index = 0; index < records.length; index += CHUNK_SIZE) {
       const chunk = records.slice(index, index + CHUNK_SIZE);
       try {
-        await upsertMatterChunk(user.id, chunk);
+        await importMatterChunk(user.id, chunk);
         for (const record of chunk) {
           if (record.inQueue) queued += 1;
           else archived += 1;
@@ -60,7 +62,7 @@ export async function POST(req: NextRequest) {
       } catch (error) {
         for (const record of chunk) {
           try {
-            await upsertMatterChunk(user.id, [record]);
+            await upsertMatterRecord(user.id, record);
             if (record.inQueue) queued += 1;
             else archived += 1;
           } catch (singleError) {
@@ -140,31 +142,57 @@ function recordFromJSON(value: unknown): MatterRecord | null {
   };
 }
 
-async function upsertMatterChunk(userId: string, records: MatterRecord[]) {
-  await prisma.$transaction(
-    records.map((record) => {
-      const data = articleData(userId, record);
-      return prisma.article.upsert({
-        where: { userId_url: { userId, url: record.url } },
-        create: data,
-        update: {
-          title: data.title,
-          author: data.author,
-          favicon: data.favicon,
-          siteName: data.siteName,
-          ttr: data.ttr,
-          archived: data.archived,
-          readAt: data.readAt,
-        },
-      });
-    }),
-  );
+async function importMatterChunk(userId: string, records: MatterRecord[]) {
+  const rows = records.map((record) => articleData(userId, record));
+  const urls = rows.map((row) => row.url);
+  const existing = await prisma.article.findMany({
+    where: { userId, url: { in: urls } },
+    select: { url: true },
+  });
+  const existingURLs = new Set(existing.map((article) => article.url));
+  const createRows = rows.filter((row) => !existingURLs.has(row.url));
+  const updateRows = rows.filter((row) => existingURLs.has(row.url));
+
+  for (let index = 0; index < createRows.length; index += CREATE_CHUNK_SIZE) {
+    await prisma.article.createMany({ data: createRows.slice(index, index + CREATE_CHUNK_SIZE) });
+  }
+
+  for (let index = 0; index < updateRows.length; index += UPDATE_CHUNK_SIZE) {
+    const chunk = updateRows.slice(index, index + UPDATE_CHUNK_SIZE);
+    await prisma.$transaction(
+      chunk.map((row) => prisma.article.updateMany({
+        where: { userId, url: row.url },
+        data: articleUpdateData(row),
+      })),
+    );
+  }
+}
+
+async function upsertMatterRecord(userId: string, record: MatterRecord) {
+  const data = articleData(userId, record);
+  await prisma.article.upsert({
+    where: { userId_url: { userId, url: record.url } },
+    create: data,
+    update: articleUpdateData(data),
+  });
+}
+
+function articleUpdateData(data: ReturnType<typeof articleData>) {
+  return {
+    title: data.title,
+    author: data.author,
+    favicon: data.favicon,
+    siteName: data.siteName,
+    ttr: data.ttr,
+    archived: data.archived,
+    readAt: data.readAt,
+  };
 }
 
 function articleData(userId: string, record: MatterRecord) {
   const parsed = new URL(record.url);
   const hostname = parsed.hostname.replace(/^www\./, "");
-  const title = cleanText(record.title) ?? hostname;
+  const title = cleanText(record.title) ?? "Imported article";
   const author = cleanText(record.author);
   const siteName = cleanText(record.publisher) ?? hostname;
   const readAt = record.read ? record.lastInteractionDate ?? new Date() : null;

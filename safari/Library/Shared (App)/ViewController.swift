@@ -996,6 +996,16 @@ struct MatterImportResult: Codable, Equatable {
         }
         return parts.joined(separator: " · ")
     }
+
+    mutating func absorb(_ other: MatterImportResult) {
+        queued += other.queued
+        archived += other.archived
+        skipped += other.skipped
+        failed += other.failed
+        hydrated += other.hydrated
+        remainingHydration = other.remainingHydration
+        lastError = other.lastError ?? lastError
+    }
 }
 
 private struct MatterImportRecord: Encodable {
@@ -1021,7 +1031,7 @@ private struct MatterImportRecord: Encodable {
         let titleValue = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let authorValue = author.trimmingCharacters(in: .whitespacesAndNewlines)
         let publisherValue = publisher.trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayTitle = titleValue.isEmpty ? normalizedURL?.host ?? "Imported article" : titleValue
+        let displayTitle = titleValue.isEmpty ? "Imported article" : titleValue
         let byline = authorValue.isEmpty ? "" : "<p class=\"byline\">By \(Self.escape(authorValue))</p>"
         let publisherMeta = publisherValue.isEmpty ? "" : "<meta property=\"og:site_name\" content=\"\(Self.escape(publisherValue))\">"
         let publisherLine = publisherValue.isEmpty ? "" : "<p>Publisher: \(Self.escape(publisherValue))</p>"
@@ -1296,7 +1306,7 @@ private enum MatterCSVParser {
             guard !raw.isEmpty, seen.insert(raw).inserted else { return nil }
             let host = URL(string: raw)?.host?.replacingOccurrences(of: "www.", with: "") ?? raw
             return MatterImportRecord(
-                title: host,
+                title: "Imported article",
                 author: "",
                 publisher: host,
                 wordCount: nil,
@@ -2212,24 +2222,18 @@ final class ReaderStore: ObservableObject {
             }
 
             let importableRecords = Array(recordsByURL.values)
-            let batchSize = 300
+            let batchSize = 100
             for start in stride(from: 0, to: importableRecords.count, by: batchSize) {
                 let end = min(start + batchSize, importableRecords.count)
                 let batch = Array(importableRecords[start..<end])
                 matterImportStatus = "Importing \(start + 1)-\(end) of \(importableRecords.count)"
-                do {
-                    let batchResult = try await api.importMatterRecords(batch, totalRows: batch.count, skipped: 0)
-                    result.queued += batchResult.queued
-                    result.archived += batchResult.archived
-                    result.skipped += batchResult.skipped
-                    result.failed += batchResult.failed
-                    result.lastError = batchResult.lastError ?? result.lastError
-                    matterImportStatus = "Imported \(result.imported) of \(importableRecords.count) · \(result.queued) inbox · \(result.archived) archive"
-                } catch {
-                    result.failed += batch.count
-                    result.lastError = error.localizedDescription
-                    matterImportStatus = "Import hit \(result.failed) failed records · continuing"
-                }
+                let batchResult = await importMatterBatch(
+                    batch,
+                    processedBefore: start,
+                    total: importableRecords.count
+                )
+                result.absorb(batchResult)
+                matterImportStatus = "Imported \(result.imported) of \(importableRecords.count) · \(result.queued) inbox · \(result.archived) archive"
             }
 
             matterImportStatus = "Refreshing library..."
@@ -2246,6 +2250,42 @@ final class ReaderStore: ObservableObject {
             matterImportStatus = nil
             errorMessage = error.localizedDescription
             return nil
+        }
+    }
+
+    private func importMatterBatch(
+        _ batch: [MatterImportRecord],
+        processedBefore: Int,
+        total: Int
+    ) async -> MatterImportResult {
+        do {
+            return try await api.importMatterRecords(batch, totalRows: batch.count, skipped: 0)
+        } catch {
+            guard batch.count > 20 else {
+                matterImportStatus = "Import failed for \(batch.count) records · continuing"
+                return MatterImportResult(
+                    totalRows: batch.count,
+                    failed: batch.count,
+                    lastError: error.localizedDescription
+                )
+            }
+
+            let retrySize = max(20, batch.count / 2)
+            var result = MatterImportResult(totalRows: batch.count)
+            var localOffset = 0
+            for start in stride(from: 0, to: batch.count, by: retrySize) {
+                let end = min(start + retrySize, batch.count)
+                matterImportStatus = "Retrying \(processedBefore + start + 1)-\(processedBefore + end) of \(total)"
+                let retryBatch = Array(batch[start..<end])
+                let retryResult = await importMatterBatch(
+                    retryBatch,
+                    processedBefore: processedBefore + localOffset,
+                    total: total
+                )
+                result.absorb(retryResult)
+                localOffset += retryBatch.count
+            }
+            return result
         }
     }
 

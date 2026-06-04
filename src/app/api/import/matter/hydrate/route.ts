@@ -62,7 +62,7 @@ async function hydrateURL(userId: string, url: string): Promise<HydrateURLResult
     await prisma.article.update({
       where: { id: article.id },
       data: {
-        title: bestHydratedTitle(article.title, extracted.title, url),
+        title: article.title,
         author: extracted.author ?? article.author,
         description: extracted.description ?? article.description,
         content: extracted.content,
@@ -150,33 +150,4 @@ function isMatterPlaceholder(content: string | null | undefined) {
   return normalized.includes("imported from matter")
     || normalized.includes("matter export does not always include")
     || normalized.includes("saved library history export");
-}
-
-function bestHydratedTitle(existingTitle: string, extractedTitle: string, url: string) {
-  const existing = existingTitle.trim();
-  const extracted = extractedTitle.trim();
-  if (!existing) return extracted || siteNameFromURL(url);
-  if (!extracted) return existing;
-  if (isWeakExtractedTitle(extracted, url)) return existing;
-  return extracted.length >= 6 ? extracted : existing;
-}
-
-function isWeakExtractedTitle(title: string, url: string) {
-  const normalized = title.trim().toLowerCase();
-  const host = siteNameFromURL(url).toLowerCase();
-  return normalized === host
-    || normalized === `www.${host}`
-    || normalized === "subscribe"
-    || normalized === "sign in"
-    || normalized === "log in"
-    || normalized === "just a moment..."
-    || normalized === "access denied";
-}
-
-function siteNameFromURL(value: string) {
-  try {
-    return new URL(value).hostname.replace(/^www\./, "");
-  } catch {
-    return "";
-  }
 }
