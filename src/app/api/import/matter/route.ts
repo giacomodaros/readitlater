@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const CHUNK_SIZE = 75;
+const CHUNK_SIZE = 300;
 const WORDS_PER_MINUTE = 238;
 
 type MatterRecord = {

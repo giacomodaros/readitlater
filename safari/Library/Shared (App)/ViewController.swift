@@ -813,7 +813,7 @@ final class ReaderAPI {
         try await send(path: "api/import/matter/hydrate", method: "POST", body: MatterHydrationBody(urls: urls, limit: nil))
     }
 
-    fileprivate func hydratePendingMatterArticles(limit: Int = 4) async throws -> MatterHydrationResult {
+    fileprivate func hydratePendingMatterArticles(limit: Int = 10) async throws -> MatterHydrationResult {
         try await send(path: "api/import/matter/hydrate", method: "POST", body: MatterHydrationBody(urls: [], limit: limit))
     }
 
@@ -1113,30 +1113,30 @@ private enum MatterCSVParser {
             if fallback.isEmpty { throw MatterCSVError.empty }
             return fallback
         }
-        var columns: [String: Int] = [:]
-        for (index, value) in header.enumerated() {
-            let key = normalizedHeader(value)
-            guard !key.isEmpty, columns[key] == nil else { continue }
-            columns[key] = index
-        }
+        let columns = columnMap(from: header)
 
         var missing: [String] = []
-        if columns["url"] == nil { missing.append("URL") }
-        if columns["in queue"] == nil { missing.append("In Queue") }
+        if columnIndex(in: columns, aliases: ["url", "article url", "original url"]) == nil { missing.append("URL") }
+        if columnIndex(in: columns, aliases: ["in queue", "queue", "queued"]) == nil { missing.append("In Queue") }
         if !missing.isEmpty {
             let fallback = fallbackRecords(from: text)
             if !fallback.isEmpty { return fallback }
             throw MatterCSVError.missingColumns(missing)
         }
 
-        let urlIndex = columns["url"]!
-        let queueIndex = columns["in queue"]!
-        let readIndex = columns["read"]
-        let titleIndex = columns["title"]
-        let authorIndex = columns["author"]
-        let publisherIndex = columns["publisher"]
-        let wordCountIndex = columns["word count"]
-        let lastInteractionIndex = columns["last interaction date"]
+        let urlIndex = columnIndex(in: columns, aliases: ["url", "article url", "original url"])!
+        let queueIndex = columnIndex(in: columns, aliases: ["in queue", "queue", "queued"])!
+        let readIndex = columnIndex(in: columns, aliases: ["read"])
+        let titleIndex = columnIndex(in: columns, aliases: ["title", "article title", "name"])
+        let authorIndex = columnIndex(in: columns, aliases: ["author", "byline"])
+        let publisherIndex = columnIndex(in: columns, aliases: ["publisher", "publication", "site", "site name"])
+        let wordCountIndex = columnIndex(in: columns, aliases: ["word count", "words", "wordcount"])
+        let lastInteractionIndex = columnIndex(in: columns, aliases: [
+            "last interaction date",
+            "last interacted at",
+            "date",
+            "saved date"
+        ])
 
         let parsed: [MatterImportRecord] = rows.dropFirst().compactMap { (row: [String]) -> MatterImportRecord? in
             guard !row.allSatisfy({ $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
@@ -1165,7 +1165,26 @@ private enum MatterCSVParser {
 
     private static func value(in row: [String], at index: Int) -> String {
         guard row.indices.contains(index) else { return "" }
-        return row[index].trimmingCharacters(in: .whitespacesAndNewlines)
+        return decodeMatterText(row[index]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func columnMap(from header: [String]) -> [String: Int] {
+        var columns: [String: Int] = [:]
+        for (index, value) in header.enumerated() {
+            let key = normalizedHeader(value)
+            guard !key.isEmpty, columns[key] == nil else { continue }
+            columns[key] = index
+        }
+        return columns
+    }
+
+    private static func columnIndex(in columns: [String: Int], aliases: [String]) -> Int? {
+        for alias in aliases {
+            if let index = columns[normalizedHeader(alias)] {
+                return index
+            }
+        }
+        return nil
     }
 
     private static func normalizedHeader(_ value: String) -> String {
@@ -1188,6 +1207,26 @@ private enum MatterCSVParser {
         let digits = value.filter { $0.isNumber || $0 == "-" }
         guard let parsed = Int(digits), parsed > 0 else { return nil }
         return parsed
+    }
+
+    private static func decodeMatterText(_ value: String) -> String {
+        var decoded = value
+        let pattern = #"=\?utf-8\?q\?([^?]+)\?="#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return decoded
+        }
+        let nsValue = decoded as NSString
+        let matches = regex.matches(in: decoded, range: NSRange(location: 0, length: nsValue.length)).reversed()
+        for match in matches {
+            guard match.numberOfRanges > 1 else { continue }
+            let encoded = nsValue.substring(with: match.range(at: 1))
+            let percentEncoded = encoded
+                .replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: #"=([0-9a-fA-F]{2})"#, with: "%$1", options: .regularExpression)
+            let replacement = percentEncoded.removingPercentEncoding ?? encoded
+            decoded = (decoded as NSString).replacingCharacters(in: match.range, with: replacement)
+        }
+        return decoded
     }
 
     private static func parseRows(_ text: String) -> [[String]] {
@@ -1300,6 +1339,7 @@ final class ReaderStore: ObservableObject {
     @Published var selectionMode = false
     @Published var selectedIds: Set<String> = []
     @Published var highlightsVersion = 0
+    @Published var matterImportStatus: String?
 
     @Published private(set) var readingProgress: [String: Double] = [:]
 
@@ -2149,12 +2189,16 @@ final class ReaderStore: ObservableObject {
     func importMatterCSV(data: Data) async -> MatterImportResult? {
         do {
             errorMessage = nil
+            matterImportStatus = nil
             loading = true
-            defer { loading = false }
+            defer {
+                loading = false
+            }
 
             let parsedRecords = try MatterCSVParser.records(from: data)
             var result = MatterImportResult(totalRows: parsedRecords.count)
             var recordsByURL: [String: MatterImportRecord] = [:]
+            matterImportStatus = "Parsed \(parsedRecords.count) Matter rows"
 
             for record in parsedRecords {
                 guard let normalizedURL = record.normalizedURL else {
@@ -2168,10 +2212,11 @@ final class ReaderStore: ObservableObject {
             }
 
             let importableRecords = Array(recordsByURL.values)
-            let batchSize = 100
+            let batchSize = 300
             for start in stride(from: 0, to: importableRecords.count, by: batchSize) {
                 let end = min(start + batchSize, importableRecords.count)
                 let batch = Array(importableRecords[start..<end])
+                matterImportStatus = "Importing \(start + 1)-\(end) of \(importableRecords.count)"
                 do {
                     let batchResult = try await api.importMatterRecords(batch, totalRows: batch.count, skipped: 0)
                     result.queued += batchResult.queued
@@ -2179,20 +2224,26 @@ final class ReaderStore: ObservableObject {
                     result.skipped += batchResult.skipped
                     result.failed += batchResult.failed
                     result.lastError = batchResult.lastError ?? result.lastError
+                    matterImportStatus = "Imported \(result.imported) of \(importableRecords.count) · \(result.queued) inbox · \(result.archived) archive"
                 } catch {
                     result.failed += batch.count
                     result.lastError = error.localizedDescription
+                    matterImportStatus = "Import hit \(result.failed) failed records · continuing"
                 }
             }
 
+            matterImportStatus = "Refreshing library..."
             await refreshAll()
+            matterImportStatus = "Imported \(result.imported). Hydrating article text in background..."
             startMatterHydrationBackfill()
             if result.failed > 0, let lastError = result.lastError {
                 errorMessage = "Matter import finished with \(result.failed) failure\(result.failed == 1 ? "" : "s"). Last error: \(lastError)"
             }
+            matterImportStatus = result.summary
             return result
         } catch {
             loading = false
+            matterImportStatus = nil
             errorMessage = error.localizedDescription
             return nil
         }
@@ -2253,11 +2304,17 @@ final class ReaderStore: ObservableObject {
             while !Task.isCancelled && passes < maxPasses {
                 passes += 1
                 do {
-                    let hydration = try await api.hydratePendingMatterArticles(limit: 4)
+                    let hydration = try await api.hydratePendingMatterArticles(limit: 10)
                     hydratedSinceRefresh += hydration.hydrated
+                    if hydration.remaining > 0 {
+                        matterImportStatus = "Hydrated \(hydratedSinceRefresh) article\(hydratedSinceRefresh == 1 ? "" : "s") · \(hydration.remaining) remaining"
+                    } else if hydration.hydrated > 0 {
+                        matterImportStatus = "Hydrated imported article text"
+                    }
                     consecutiveFailures = hydration.failed > 0 && hydration.hydrated == 0 ? consecutiveFailures + 1 : 0
 
                     if hydration.hydrated == 0 && hydration.skipped == 0 && hydration.failed == 0 {
+                        matterImportStatus = nil
                         break
                     }
 
@@ -2267,6 +2324,7 @@ final class ReaderStore: ObservableObject {
                     }
 
                     if hydration.remaining == 0 {
+                        matterImportStatus = nil
                         break
                     }
 
@@ -4254,8 +4312,16 @@ struct LibrarySettingsPane: View {
                         .foregroundStyle(store.theme.primary)
                 }
 
-                if let matterImportMessage {
+                if importingMatter, let status = store.matterImportStatus {
+                    Text(status)
+                        .font(.footnote)
+                        .foregroundStyle(store.theme.secondary)
+                } else if let matterImportMessage {
                     Text(matterImportMessage)
+                        .font(.footnote)
+                        .foregroundStyle(store.theme.secondary)
+                } else if let status = store.matterImportStatus {
+                    Text(status)
                         .font(.footnote)
                         .foregroundStyle(store.theme.secondary)
                 }

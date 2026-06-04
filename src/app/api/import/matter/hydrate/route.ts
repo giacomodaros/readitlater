@@ -7,8 +7,15 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const MAX_URLS_PER_REQUEST = 6;
-const DEFAULT_PENDING_LIMIT = 4;
+const MAX_URLS_PER_REQUEST = 10;
+const DEFAULT_PENDING_LIMIT = 10;
+
+type HydrateURLResult = {
+  hydrated: number;
+  skipped: number;
+  failed: number;
+  lastError: string | null;
+};
 
 export async function POST(req: NextRequest) {
   try {
@@ -22,52 +29,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ hydrated: 0, skipped: 0, failed: 0, remaining: 0, lastError: null });
     }
 
-    let hydrated = 0;
-    let skipped = 0;
-    let failed = 0;
-    let lastError: string | null = null;
-
-    for (const url of urls.slice(0, MAX_URLS_PER_REQUEST)) {
-      const article = await prisma.article.findUnique({
-        where: { userId_url: { userId: user.id, url } },
-      });
-
-      if (!article) {
-        skipped += 1;
-        continue;
-      }
-
-      if (!isMatterPlaceholder(article.content)) {
-        skipped += 1;
-        continue;
-      }
-
-      try {
-        const extracted = await extractArticle(url);
-        await prisma.article.update({
-          where: { id: article.id },
-          data: {
-            title: extracted.title,
-            author: extracted.author,
-            description: extracted.description,
-            content: extracted.content,
-            image: extracted.image,
-            favicon: extracted.favicon,
-            siteName: extracted.siteName,
-            publishedAt: extracted.publishedAt,
-            ttr: extracted.ttr,
-          },
-        });
-        hydrated += 1;
-      } catch (error) {
-        failed += 1;
-        lastError = error instanceof Error ? `${url}: ${error.message}` : `${url}: fetch failed`;
-        await prisma.article.update({
-          where: { id: article.id },
-          data: { updatedAt: new Date() },
-        });
-      }
-    }
+    const results = await Promise.all(urls.slice(0, MAX_URLS_PER_REQUEST).map((url) => hydrateURL(user.id, url)));
+    const hydrated = results.reduce((sum, result) => sum + result.hydrated, 0);
+    const skipped = results.reduce((sum, result) => sum + result.skipped, 0);
+    const failed = results.reduce((sum, result) => sum + result.failed, 0);
+    const lastError = results.find((result) => result.lastError)?.lastError ?? null;
 
     const remaining = await countMatterPlaceholders(user.id);
     return NextResponse.json({ hydrated, skipped, failed, remaining, lastError });
@@ -75,6 +41,46 @@ export async function POST(req: NextRequest) {
     if (error instanceof Error && error.message === "UNAUTHENTICATED") return authErrorResponse();
     const message = error instanceof Error ? error.message : "Matter hydration failed.";
     return NextResponse.json({ error: message }, { status: 422 });
+  }
+}
+
+async function hydrateURL(userId: string, url: string): Promise<HydrateURLResult> {
+  const article = await prisma.article.findUnique({
+    where: { userId_url: { userId, url } },
+  });
+
+  if (!article) {
+    return { hydrated: 0, skipped: 1, failed: 0, lastError: null };
+  }
+
+  if (!isMatterPlaceholder(article.content)) {
+    return { hydrated: 0, skipped: 1, failed: 0, lastError: null };
+  }
+
+  try {
+    const extracted = await extractArticle(url);
+    await prisma.article.update({
+      where: { id: article.id },
+      data: {
+        title: bestHydratedTitle(article.title, extracted.title, url),
+        author: extracted.author ?? article.author,
+        description: extracted.description ?? article.description,
+        content: extracted.content,
+        image: extracted.image ?? article.image,
+        favicon: extracted.favicon || article.favicon,
+        siteName: extracted.siteName ?? article.siteName,
+        publishedAt: extracted.publishedAt ?? article.publishedAt,
+        ttr: extracted.ttr,
+      },
+    });
+    return { hydrated: 1, skipped: 0, failed: 0, lastError: null };
+  } catch (error) {
+    const lastError = error instanceof Error ? `${url}: ${error.message}` : `${url}: fetch failed`;
+    await prisma.article.update({
+      where: { id: article.id },
+      data: { updatedAt: new Date() },
+    });
+    return { hydrated: 0, skipped: 0, failed: 1, lastError };
   }
 }
 
@@ -144,4 +150,33 @@ function isMatterPlaceholder(content: string | null | undefined) {
   return normalized.includes("imported from matter")
     || normalized.includes("matter export does not always include")
     || normalized.includes("saved library history export");
+}
+
+function bestHydratedTitle(existingTitle: string, extractedTitle: string, url: string) {
+  const existing = existingTitle.trim();
+  const extracted = extractedTitle.trim();
+  if (!existing) return extracted || siteNameFromURL(url);
+  if (!extracted) return existing;
+  if (isWeakExtractedTitle(extracted, url)) return existing;
+  return extracted.length >= 6 ? extracted : existing;
+}
+
+function isWeakExtractedTitle(title: string, url: string) {
+  const normalized = title.trim().toLowerCase();
+  const host = siteNameFromURL(url).toLowerCase();
+  return normalized === host
+    || normalized === `www.${host}`
+    || normalized === "subscribe"
+    || normalized === "sign in"
+    || normalized === "log in"
+    || normalized === "just a moment..."
+    || normalized === "access denied";
+}
+
+function siteNameFromURL(value: string) {
+  try {
+    return new URL(value).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
 }
