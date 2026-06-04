@@ -1135,7 +1135,6 @@ private enum MatterCSVParser {
 
         var missing: [String] = []
         if columnIndex(in: columns, aliases: ["url", "article url", "original url"]) == nil { missing.append("URL") }
-        if columnIndex(in: columns, aliases: ["title", "article title", "name"]) == nil { missing.append("Title") }
         if columnIndex(in: columns, aliases: ["in queue", "queue", "queued"]) == nil { missing.append("In Queue") }
         if !missing.isEmpty {
             throw MatterCSVError.missingColumns(missing)
@@ -1144,7 +1143,7 @@ private enum MatterCSVParser {
         let urlIndex = columnIndex(in: columns, aliases: ["url", "article url", "original url"])!
         let queueIndex = columnIndex(in: columns, aliases: ["in queue", "queue", "queued"])!
         let readIndex = columnIndex(in: columns, aliases: ["read"])
-        let titleIndex = columnIndex(in: columns, aliases: ["title", "article title", "name"])!
+        let titleIndex = columnIndex(in: columns, aliases: ["title", "article title", "name"])
         let authorIndex = columnIndex(in: columns, aliases: ["author", "byline"])
         let publisherIndex = columnIndex(in: columns, aliases: ["publisher", "publication", "site", "site name"])
         let wordCountIndex = columnIndex(in: columns, aliases: ["word count", "words", "wordcount"])
@@ -1160,8 +1159,9 @@ private enum MatterCSVParser {
                 return nil
             }
             let url = value(in: row, at: urlIndex)
-            let title = value(in: row, at: titleIndex)
-            guard !url.isEmpty, !title.isEmpty else { return nil }
+            guard !url.isEmpty else { return nil }
+            let parsedTitle = titleIndex.map { value(in: row, at: $0) } ?? ""
+            let title = parsedTitle.isEmpty ? titleFromURL(url) : parsedTitle
             return MatterImportRecord(
                 title: title,
                 author: authorIndex.map { value(in: row, at: $0) } ?? "",
@@ -1223,6 +1223,17 @@ private enum MatterCSVParser {
         let digits = value.filter { $0.isNumber || $0 == "-" }
         guard let parsed = Int(digits), parsed > 0 else { return nil }
         return parsed
+    }
+
+    private static func titleFromURL(_ value: String) -> String {
+        let normalized = value.contains("://") ? value : "https://\(value)"
+        guard let url = URL(string: normalized) else { return "Untitled" }
+        let lastPath = url.pathComponents.last?.removingPercentEncoding ?? ""
+        let cleaned = lastPath
+            .replacingOccurrences(of: #"\.[A-Za-z0-9]+$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"[-_+]+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? url.host?.replacingOccurrences(of: "www.", with: "") ?? "Untitled" : cleaned
     }
 
     private static func decodeMatterText(_ value: String) -> String {

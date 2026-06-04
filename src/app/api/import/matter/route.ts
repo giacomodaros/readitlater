@@ -37,17 +37,12 @@ export async function POST(req: NextRequest) {
     const byURL = new Map<string, MatterRecord>();
     for (const record of parsed.records) {
       const url = normalizeURL(record.url);
-      const title = cleanText(record.title);
       if (!url) {
         skipped += 1;
         continue;
       }
-      if (!title) {
-        skipped += 1;
-        continue;
-      }
       if (byURL.has(url)) skipped += 1;
-      byURL.set(url, { ...record, url, title });
+      byURL.set(url, { ...record, url, title: cleanText(record.title) });
     }
 
     const records = Array.from(byURL.values());
