@@ -1128,15 +1128,24 @@ private enum MatterCSVParser {
         guard !text.isEmpty else { throw MatterCSVError.empty }
 
         let rows = parseRows(text)
-        guard let header = rows.first else {
+        guard let headerIndex = rows.firstIndex(where: { row in
+            let columns = columnMap(from: row)
+            return columnIndex(in: columns, aliases: ["url", "article url", "original url"]) != nil
+                && columnIndex(in: columns, aliases: ["in queue", "queue", "queued"]) != nil
+        }) else {
+            let fallback = matterColumnOrderRecords(from: rows)
+            if !fallback.isEmpty { return fallback }
             throw MatterCSVError.empty
         }
+        let header = rows[headerIndex]
         let columns = columnMap(from: header)
 
         var missing: [String] = []
         if columnIndex(in: columns, aliases: ["url", "article url", "original url"]) == nil { missing.append("URL") }
         if columnIndex(in: columns, aliases: ["in queue", "queue", "queued"]) == nil { missing.append("In Queue") }
         if !missing.isEmpty {
+            let fallback = matterColumnOrderRecords(from: rows)
+            if !fallback.isEmpty { return fallback }
             throw MatterCSVError.missingColumns(missing)
         }
 
@@ -1154,7 +1163,7 @@ private enum MatterCSVParser {
             "saved date"
         ])
 
-        let parsed: [MatterImportRecord] = rows.dropFirst().compactMap { (row: [String]) -> MatterImportRecord? in
+        let parsed: [MatterImportRecord] = rows.dropFirst(headerIndex + 1).compactMap { (row: [String]) -> MatterImportRecord? in
             guard !row.allSatisfy({ $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
                 return nil
             }
@@ -1174,6 +1183,8 @@ private enum MatterCSVParser {
             )
         }
         if parsed.isEmpty {
+            let fallback = matterColumnOrderRecords(from: rows)
+            if !fallback.isEmpty { return fallback }
             throw MatterCSVError.empty
         }
         return parsed
@@ -1234,6 +1245,35 @@ private enum MatterCSVParser {
             .replacingOccurrences(of: #"[-_+]+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? url.host?.replacingOccurrences(of: "www.", with: "") ?? "Untitled" : cleaned
+    }
+
+    private static func matterColumnOrderRecords(from rows: [[String]]) -> [MatterImportRecord] {
+        rows.compactMap { row in
+            guard row.count >= 7 else { return nil }
+            let firstCell = normalizedHeader(row[0])
+            if firstCell == "title" { return nil }
+
+            let url = value(in: row, at: 3)
+            guard isImportableURL(url) else { return nil }
+            let parsedTitle = value(in: row, at: 0)
+            let title = parsedTitle.isEmpty ? titleFromURL(url) : parsedTitle
+            return MatterImportRecord(
+                title: title,
+                author: value(in: row, at: 1),
+                publisher: value(in: row, at: 2),
+                wordCount: parseInt(value(in: row, at: 5)),
+                url: url,
+                inQueue: parseBool(value(in: row, at: 6)),
+                read: row.indices.contains(8) ? parseBool(value(in: row, at: 8)) : false,
+                lastInteractionDate: row.indices.contains(10) ? value(in: row, at: 10) : nil
+            )
+        }
+    }
+
+    private static func isImportableURL(_ value: String) -> Bool {
+        let normalized = value.contains("://") ? value : "https://\(value)"
+        guard let url = URL(string: normalized) else { return false }
+        return url.scheme == "http" || url.scheme == "https"
     }
 
     private static func decodeMatterText(_ value: String) -> String {
