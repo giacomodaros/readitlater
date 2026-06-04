@@ -14,9 +14,7 @@ export async function POST(req: NextRequest) {
   try {
     const user = await requireUser();
     const body = await req.json();
-    const requestedURLs = Array.isArray(body.urls)
-      ? body.urls.map((url) => normalizeURL(String(url))).filter((url): url is string => Boolean(url))
-      : [];
+    const requestedURLs = parseRequestedURLs(body.urls);
     const pendingLimit = clampLimit(body.limit);
     const urls = requestedURLs.length ? requestedURLs : await pendingPlaceholderURLs(user.id, pendingLimit);
 
@@ -109,6 +107,21 @@ function clampLimit(value: unknown) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return DEFAULT_PENDING_LIMIT;
   return Math.max(1, Math.min(MAX_URLS_PER_REQUEST, Math.floor(parsed)));
+}
+
+function parseRequestedURLs(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const normalized = normalizeURL(String(item));
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    urls.push(normalized);
+  }
+
+  return urls;
 }
 
 function normalizeURL(value: string) {
