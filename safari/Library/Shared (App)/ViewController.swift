@@ -1877,7 +1877,9 @@ final class ReaderStore: ObservableObject {
         locallySetArchived(target, summaries: targets)
         exitSelectionMode()
         do {
-            _ = try await api.bulkSetArchived(target, ids: ids)
+            try await performBulkRequests(ids: ids) { batch in
+                _ = try await api.bulkSetArchived(target, ids: batch)
+            }
         } catch {
             errorMessage = error.localizedDescription
             await refreshAll()
@@ -1894,10 +1896,16 @@ final class ReaderStore: ObservableObject {
         locallyDeleteArticles(ids: Set(ids))
         exitSelectionMode()
         do {
-            _ = try await api.bulkDeleteArticles(ids: ids)
+            try await performBulkRequests(ids: ids) { batch in
+                _ = try await api.bulkDeleteArticles(ids: batch)
+            }
         } catch {
-            errorMessage = error.localizedDescription
-            await refreshAll()
+            do {
+                try await performIndividualDeletes(ids: ids)
+            } catch {
+                errorMessage = error.localizedDescription
+                await refreshAll()
+            }
         }
     }
 
@@ -1911,10 +1919,30 @@ final class ReaderStore: ObservableObject {
         locallySetRead(read, ids: Set(ids))
         exitSelectionMode()
         do {
-            _ = try await api.bulkSetRead(read, ids: ids)
+            try await performBulkRequests(ids: ids) { batch in
+                _ = try await api.bulkSetRead(read, ids: batch)
+            }
         } catch {
             errorMessage = error.localizedDescription
             await refreshAll()
+        }
+    }
+
+    private func performBulkRequests(
+        ids: [String],
+        batchSize: Int = 400,
+        operation: ([String]) async throws -> Void
+    ) async throws {
+        guard batchSize > 0 else { return }
+        for start in stride(from: 0, to: ids.count, by: batchSize) {
+            let end = min(start + batchSize, ids.count)
+            try await operation(Array(ids[start..<end]))
+        }
+    }
+
+    private func performIndividualDeletes(ids: [String]) async throws {
+        for id in ids {
+            try await api.deleteArticle(id: id)
         }
     }
 
@@ -3134,7 +3162,9 @@ struct CompactLibraryView: View {
 
     @ViewBuilder
     private var nativeTabShell: some View {
-        if #available(iOS 18.0, *) {
+        if store.selectionMode {
+            navigationPane(pane)
+        } else if #available(iOS 18.0, *) {
             TabView(selection: Binding(get: { pane }, set: { updatePaneSelection($0) })) {
                 Tab("Inbox", systemImage: "tray", value: CompactLibraryPane.inbox) {
                     navigationPane(.inbox)
@@ -3182,11 +3212,6 @@ struct CompactLibraryView: View {
                     .zIndex(3)
             }
 
-            if contentPane != .settings && !store.selectionMode && !searchPresented {
-                listBottomFade
-                    .zIndex(2)
-            }
-
             if contentScrolled && !searchPresented {
                 compactTopChrome(for: contentPane)
                     .transition(.opacity)
@@ -3200,10 +3225,6 @@ struct CompactLibraryView: View {
         .animation(.spring(response: 0.30, dampingFraction: 0.9), value: searchPresented)
         .background(store.theme.background.ignoresSafeArea())
         .environment(\.colorScheme, store.theme.isDark ? .dark : .light)
-        .safeAreaInset(edge: .bottom) {
-            Color.clear
-                .frame(height: store.selectionMode ? 112 : 0)
-        }
     }
 
     private func selectPane(_ newPane: CompactLibraryPane) {
@@ -3245,13 +3266,14 @@ struct CompactLibraryView: View {
                 LinearGradient(
                     stops: [
                         .init(color: .clear, location: 0),
-                        .init(color: store.theme.background.opacity(0.74), location: 0.52),
+                        .init(color: .clear, location: 0.34),
+                        .init(color: store.theme.background.opacity(0.62), location: 0.72),
                         .init(color: store.theme.background, location: 1),
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 )
-                .frame(height: 104 + proxy.safeAreaInsets.bottom)
+                .frame(height: 150 + proxy.safeAreaInsets.bottom)
                 .padding(.bottom, -proxy.safeAreaInsets.bottom)
             }
         }
@@ -3835,7 +3857,7 @@ struct NativeArticleTable: UIViewControllerRepresentable {
             self.model = model
             view.backgroundColor = UIColor(model.theme.background)
             tableView.backgroundColor = .clear
-            tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: model.selectionMode ? 96 : 12, right: 0)
+            tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: model.selectionMode ? 72 : 12, right: 0)
             tableView.verticalScrollIndicatorInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
 
             let signature = model.reloadSignature
@@ -4142,7 +4164,7 @@ struct LibrarySettingsPane: View {
             Section {
                 settingsHeader
             }
-            .listRowInsets(EdgeInsets(top: 0, leading: 22, bottom: 0, trailing: 22))
+            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 22))
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
 

@@ -9,7 +9,13 @@ export async function POST(req: NextRequest) {
     const user = await requireUser();
     const body = await req.json();
     const ids = Array.isArray(body.ids)
-      ? Array.from(new Set(body.ids.filter((id: unknown): id is string => typeof id === "string" && id.trim()).map((id: string) => id.trim())))
+      ? Array.from(
+          new Set(
+            body.ids
+              .filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
+              .map((id: string) => id.trim()),
+          ),
+        )
       : [];
     const action = typeof body.action === "string" ? body.action : "";
 
